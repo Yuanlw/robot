@@ -163,6 +163,8 @@ def command(text: str):
     if llm.enabled:
         try:
             return {"needs_confirmation": False, "reply": llm.chat(text), "source": "llm"}
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
         except Exception as exc:
             raise HTTPException(502, f"模型调用失败：{exc}") from exc
     raise HTTPException(400, "目前支持的格式：提醒我明天晚上八点练琴；复杂表达需要配置模型")
@@ -174,5 +176,7 @@ def chat(text: str):
         raise HTTPException(503, "LLM 未配置")
     try:
         return {"reply": llm.chat(text), "model": settings.llm_model}
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(502, f"模型调用失败：{exc}") from exc
