@@ -23,6 +23,8 @@ uvicorn app.main:app --reload
 - `POST /api/faces/enroll`：上传一张只含一个人的照片注册
 - `POST /api/faces/recognize`：上传照片识别已注册成员
 - `POST /api/speak?text=你好`：调用本机 TTS（未安装时返回 text-only）
+- `POST /api/transcribe`：上传音频并转成中文文字
+- `POST /api/command?text=提醒我明天晚上八点练琴`：解析提醒指令并返回确认内容；确认后再调用 `/api/reminders`
 
 ## 设计原则
 
