@@ -22,11 +22,15 @@ llm = LLMService()
 
 async def reminder_loop():
     while True:
-        for reminder in due_now():
-            person = f"{reminder['person_name']}，" if reminder.get("person_name") else ""
-            spoken = f"{person}提醒时间到了：{reminder['text']}"
-            voice.speak(spoken)
-            record_event("reminder_delivered", {"reminder_id": reminder["id"], "text": spoken, "voice": voice.status()})
+        try:
+            for reminder in due_now():
+                person = f"{reminder['person_name']}，" if reminder.get("person_name") else ""
+                spoken = f"{person}提醒时间到了：{reminder['text']}"
+                result = voice.speak(spoken)
+                record_event("reminder_delivered", {"reminder_id": reminder["id"], "text": spoken, "voice": result})
+        except Exception as exc:
+            # A broken audio driver must not stop the reminder scheduler.
+            record_event("reminder_error", {"error": str(exc)})
         await asyncio.sleep(15)
 
 
