@@ -6,6 +6,8 @@ import subprocess
 
 class VoiceService:
     def status(self) -> str:
+        if shutil.which("say"):
+            return "macos-say"
         try:
             import pyttsx3  # noqa: F401
             return "local-tts"
@@ -29,7 +31,13 @@ class VoiceService:
     def speak(self, text: str) -> str:
         try:
             import pyttsx3
-        except ImportError:
+            engine = pyttsx3.init()
+            engine.say(text)
+            engine.runAndWait()
+            return "spoken"
+        except Exception:
+            # pyttsx3 can import successfully but fail to initialize its macOS
+            # driver. Fall back to the system voice command in that case.
             command = shutil.which("say") or shutil.which("espeak-ng") or shutil.which("espeak")
             if not command:
                 return "text-only"
@@ -39,7 +47,3 @@ class VoiceService:
                 return "spoken"
             except OSError:
                 return "text-only"
-        engine = pyttsx3.init()
-        engine.say(text)
-        engine.runAndWait()
-        return "spoken"
