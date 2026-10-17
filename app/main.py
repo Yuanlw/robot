@@ -88,7 +88,7 @@ let recognition; if('webkitSpeechRecognition' in window||'SpeechRecognition' in 
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "service": "family-robot", "version": app.version, "llm_enabled": llm.enabled, "voice": voice.status()}
+    return {"ok": True, "service": "family-robot", "version": app.version, "llm_enabled": llm.enabled, "llm_blocked": llm.blocked_reason, "voice": voice.status()}
 
 
 @app.get("/api/reminders")
@@ -164,9 +164,13 @@ def command(text: str):
         try:
             return {"needs_confirmation": False, "reply": llm.chat(text), "source": "llm"}
         except RuntimeError as exc:
+            if llm.blocked_reason:
+                return {"needs_confirmation": False, "reply": "我现在可以设置提醒，但聊天模型暂时不可用。请先使用‘提醒我明天晚上八点练琴’这类指令。", "source": "local-fallback", "detail": str(exc)}
             raise HTTPException(503, str(exc)) from exc
         except Exception as exc:
             raise HTTPException(502, f"模型调用失败：{exc}") from exc
+    if llm.blocked_reason:
+        return {"needs_confirmation": False, "reply": "我现在可以设置提醒，但聊天模型暂时不可用。请先使用‘提醒我明天晚上八点练琴’这类指令。", "source": "local-fallback", "detail": llm.blocked_reason}
     raise HTTPException(400, "目前支持的格式：提醒我明天晚上八点练琴；复杂表达需要配置模型")
 
 

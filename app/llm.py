@@ -14,6 +14,7 @@ class LLMService:
 
     def __init__(self) -> None:
         self._client: Any = None
+        self._blocked_reason: str | None = None
         if settings.llm_api_key:
             try:
                 from openai import OpenAI
@@ -28,11 +29,17 @@ class LLMService:
 
     @property
     def enabled(self) -> bool:
-        return self._client is not None
+        return self._client is not None and self._blocked_reason is None
+
+    @property
+    def blocked_reason(self) -> str | None:
+        return self._blocked_reason
 
     def chat(self, text: str) -> str:
         if not self._client:
             raise RuntimeError("LLM 未配置：请设置 ROBOT_LLM_API_KEY 并安装 openai")
+        if self._blocked_reason:
+            raise RuntimeError(self._blocked_reason)
         try:
             response = self._client.chat.completions.create(
                 model=settings.llm_model,
@@ -48,6 +55,7 @@ class LLMService:
             )
         except Exception as exc:
             if getattr(exc, "status_code", None) == 403 or "official clients" in str(exc):
-                raise RuntimeError("当前模型密钥只允许官方 Codex 客户端，不能用于家庭机器人。请换一个允许 OpenAI 兼容 API 的密钥") from exc
+                self._blocked_reason = "模型服务拒绝了家庭机器人请求：此 Key 目前只允许官方 Codex 客户端。请让中间商把 Key 切换为允许第三方 OpenAI 兼容 API 的类型"
+                raise RuntimeError(self._blocked_reason) from exc
             raise
         return (response.choices[0].message.content or "").strip()
