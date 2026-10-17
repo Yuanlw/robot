@@ -12,9 +12,12 @@ from .commands import parse_reminder
 from .face import FaceService
 from .reminders import cancel, create, due_now, list_active
 from .voice import VoiceService
+from .llm import LLMService
+from .config import settings
 
 faces = FaceService()
 voice = VoiceService()
+llm = LLMService()
 
 
 async def reminder_loop():
@@ -56,7 +59,7 @@ def home():
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "service": "family-robot", "version": app.version}
+    return {"ok": True, "service": "family-robot", "version": app.version, "llm_enabled": llm.enabled}
 
 
 @app.get("/api/reminders")
@@ -120,7 +123,22 @@ async def transcribe(audio: UploadFile = File(...)):
 @app.post("/api/command")
 def command(text: str):
     parsed = parse_reminder(text)
-    if not parsed:
-        raise HTTPException(400, "目前支持的格式：提醒我明天晚上八点练琴")
-    reminder_text, due_at = parsed
-    return {"needs_confirmation": True, "text": reminder_text, "due_at": due_at.isoformat(), "message": f"确认一下，{due_at:%m月%d日%H点%M分}提醒你{reminder_text}，可以吗？"}
+    if parsed:
+        reminder_text, due_at = parsed
+        return {"needs_confirmation": True, "text": reminder_text, "due_at": due_at.isoformat(), "message": f"确认一下，{due_at:%m月%d日%H点%M分}提醒你{reminder_text}，可以吗？", "source": "local"}
+    if llm.enabled:
+        try:
+            return {"needs_confirmation": False, "reply": llm.chat(text), "source": "llm"}
+        except Exception as exc:
+            raise HTTPException(502, f"模型调用失败：{exc}") from exc
+    raise HTTPException(400, "目前支持的格式：提醒我明天晚上八点练琴；复杂表达需要配置模型")
+
+
+@app.post("/api/chat")
+def chat(text: str):
+    if not llm.enabled:
+        raise HTTPException(503, "LLM 未配置")
+    try:
+        return {"reply": llm.chat(text), "model": settings.llm_model}
+    except Exception as exc:
+        raise HTTPException(502, f"模型调用失败：{exc}") from exc
