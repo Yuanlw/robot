@@ -1,0 +1,11 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+APScheduler==3.11.0
+pydantic-settings==2.7.1
+
+# Optional local capabilities:
+# opencv-python
+# face-recognition
+# SpeechRecognition
+# pyttsx3
