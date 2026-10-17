@@ -1,7 +1,4 @@
-.venv/
-__pycache__/
-*.py[cod]
 .env
-data/*.db
-data/faces/
-.DS_Store
+.venv/
+data/
+__pycache__/
