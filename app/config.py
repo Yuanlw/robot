@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     timezone: str = "Asia/Shanghai"
     face_threshold: float = 0.48
+    lbph_threshold: float = 75.0
     llm_api_key: str | None = None
     llm_base_url: str = "https://api.aigocode.dev/v1"
     llm_model: str = "gpt-4o-mini"

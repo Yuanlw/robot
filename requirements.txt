@@ -6,7 +6,7 @@ pydantic-settings==2.7.1
 openai==1.58.1
 
 # Optional local capabilities:
-# opencv-python
+opencv-contrib-python-headless==4.10.0.84
 # face-recognition
 # SpeechRecognition
 # pyttsx3
