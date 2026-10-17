@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from .db import init_db
+from .commands import parse_reminder
 from .face import FaceService
 from .reminders import cancel, create, due_now, list_active
 from .voice import VoiceService
@@ -102,3 +103,24 @@ async def recognize_face(image: UploadFile = File(...)):
 @app.post("/api/speak")
 def speak(text: str):
     return {"text": text, "status": voice.speak(text)}
+
+
+@app.post("/api/transcribe")
+async def transcribe(audio: UploadFile = File(...)):
+    path = Path("/tmp") / f"robot-audio-{audio.filename}"
+    path.write_bytes(await audio.read())
+    try:
+        return {"text": voice.transcribe(str(path))}
+    except RuntimeError as exc:
+        raise HTTPException(501, str(exc)) from exc
+    finally:
+        path.unlink(missing_ok=True)
+
+
+@app.post("/api/command")
+def command(text: str):
+    parsed = parse_reminder(text)
+    if not parsed:
+        raise HTTPException(400, "目前支持的格式：提醒我明天晚上八点练琴")
+    reminder_text, due_at = parsed
+    return {"needs_confirmation": True, "text": reminder_text, "due_at": due_at.isoformat(), "message": f"确认一下，{due_at:%m月%d日%H点%M分}提醒你{reminder_text}，可以吗？"}
