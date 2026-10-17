@@ -1,4 +1,5 @@
 import sqlite3
+import json
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -50,3 +51,23 @@ def init_db() -> None:
 
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def record_event(event_type: str, payload: dict) -> None:
+    with connection() as conn:
+        conn.execute(
+            "INSERT INTO events(event_type,payload,created_at) VALUES(?,?,?)",
+            (event_type, json.dumps(payload, ensure_ascii=False), now_iso()),
+        )
+
+
+def list_events(limit: int = 30) -> list[dict]:
+    with connection() as conn:
+        rows = conn.execute(
+            "SELECT id,event_type,payload,created_at FROM events ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [
+        {"id": row["id"], "type": row["event_type"], "payload": json.loads(row["payload"]), "created_at": row["created_at"]}
+        for row in rows
+    ]
