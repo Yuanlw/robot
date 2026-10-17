@@ -1,7 +1,21 @@
-"""Voice adapters. MVP stays usable when optional packages are absent."""
+"""Voice adapters with browser input and native OS speech output fallbacks."""
+
+import shutil
+import subprocess
 
 
 class VoiceService:
+    def status(self) -> str:
+        try:
+            import pyttsx3  # noqa: F401
+            return "local-tts"
+        except ImportError:
+            if shutil.which("say"):
+                return "macos-say"
+            if shutil.which("espeak-ng") or shutil.which("espeak"):
+                return "espeak"
+            return "text-only"
+
     def transcribe(self, audio_path: str) -> str:
         try:
             import speech_recognition as sr
@@ -16,7 +30,15 @@ class VoiceService:
         try:
             import pyttsx3
         except ImportError:
-            return "text-only"
+            command = shutil.which("say") or shutil.which("espeak-ng") or shutil.which("espeak")
+            if not command:
+                return "text-only"
+            args = [command, text] if command.endswith("say") else [command, "-v", "cmn", text]
+            try:
+                subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return "spoken"
+            except OSError:
+                return "text-only"
         engine = pyttsx3.init()
         engine.say(text)
         engine.runAndWait()
