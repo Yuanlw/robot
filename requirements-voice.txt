@@ -1,0 +1,5 @@
+# Python 3.12: misaki-fork currently requires Python <3.13.
+-r requirements.txt
+kokoro-onnx==0.6.1
+misaki-fork[zh]==0.9.6
+soundfile==0.14.0
