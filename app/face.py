@@ -32,7 +32,7 @@ class FaceService:
                 "ON CONFLICT(name) DO UPDATE SET face_encoding=excluded.face_encoding, created_at=excluded.created_at",
                 (name, payload, now_iso()),
             )
-            person_id = cur.lastrowid or conn.execute("SELECT id FROM people WHERE name=?", (name,)).fetchone()[0]
+            person_id = conn.execute("SELECT id FROM people WHERE name=?", (name,)).fetchone()[0]
         return {"id": person_id, "name": name}
 
     def _opencv_faces(self, image_path: str):
@@ -83,14 +83,14 @@ class FaceService:
                     known.append((row, data["values"]))
             results = []
             for encoding in encodings:
-                best_name, best_distance = "未知", 1.0
+                best_name, best_distance, best_id = "未知", 1.0, None
                 for row, values in known:
                     distance = dlib.face_distance([values], encoding)[0]
                     if distance < best_distance:
-                        best_name, best_distance = row["name"], float(distance)
+                        best_name, best_distance, best_id = row["name"], float(distance), row["id"]
                 if best_distance > settings.face_threshold:
-                    best_name = "未知"
-                results.append({"name": best_name, "distance": round(best_distance, 4)})
+                    best_name, best_id = "未知", None
+                results.append({"person_id": best_id, "name": best_name, "distance": round(best_distance, 4)})
             return {"faces": results, "count": len(results), "backend": "dlib"}
 
         cv2, _, crops = self._opencv_faces(image_path)
@@ -108,12 +108,12 @@ class FaceService:
                 models.append((row, model))
         results = []
         for crop in crops:
-            best_name, best_confidence = "未知", 999.0
+            best_name, best_confidence, best_id = "未知", 999.0, None
             for row, model in models:
                 _, confidence = model.predict(crop)
                 if confidence < best_confidence:
-                    best_name, best_confidence = row["name"], float(confidence)
+                    best_name, best_confidence, best_id = row["name"], float(confidence), row["id"]
             if best_confidence > settings.lbph_threshold:
-                best_name = "未知"
-            results.append({"name": best_name, "confidence": round(best_confidence, 2)})
+                best_name, best_id = "未知", None
+            results.append({"person_id": best_id, "name": best_name, "confidence": round(best_confidence, 2)})
         return {"faces": results, "count": len(results), "backend": "opencv-lbph"}

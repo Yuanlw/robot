@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>家庭机器人</title><style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#213532;background:#f6f5f1}*{box-sizing:border-box}body{max-width:1160px;margin:0 auto;padding:26px 20px}h1{margin:0;font-size:29px;letter-spacing:-.5px}.sub{color:#697873;margin:6px 0 22px}.brand{display:flex;align-items:center;gap:14px}.brand img{width:56px;height:56px}.top{display:flex;align-items:center;justify-content:space-between}.nav{display:flex;gap:8px;margin:22px 0}.nav button{background:transparent;color:#60716d;padding:10px 16px}.nav button.active{background:#174747;color:white}.grid{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(300px,.7fr);gap:18px}.card{background:white;border:1px solid #e6e8e2;border-radius:20px;padding:22px;box-shadow:0 6px 20px #243a2c0a}h2{font-size:18px;margin:0 0 14px}.chat{min-height:360px;display:flex;flex-direction:column}.messages{flex:1;min-height:190px;max-height:420px;overflow:auto;background:#fafbf8;border-radius:14px;padding:12px}.msg{padding:10px 13px;border-radius:14px;margin:7px 0;max-width:85%;white-space:pre-wrap}.user{background:#e4f0ed;margin-left:auto}.bot{background:#f0f5ef}.row{display:flex;gap:8px;margin-top:10px;align-items:center}.row button{flex-shrink:0;white-space:nowrap}.speaker-controls{flex-wrap:wrap}.speaker-controls select{max-width:220px}input,button,textarea,select{font:inherit;border-radius:11px;border:1px solid #d5ded8;padding:11px}input,textarea{width:100%;min-width:0}button{background:#167d72;color:white;border:0;cursor:pointer;min-height:42px}button:hover{filter:brightness(.96)}button:disabled{opacity:.55;cursor:wait}button.secondary{background:#eef3ef;color:#263f39}.small{font-size:13px;color:#697873}.reminder{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid #edf0eb}.reminder-actions{display:flex;gap:6px;flex-shrink:0}.reminder-actions button{padding:7px 10px;min-height:36px}.camera{width:100%;border-radius:12px;background:#131a27;aspect-ratio:4/3;object-fit:cover}.camera[hidden]{display:none}.status{padding:10px 12px;border-radius:11px;background:#f0f4ef;color:#4e5c70;margin-top:10px}.ok{color:#16834b}.warn{color:#a45b00}.hero{display:flex;align-items:center;gap:14px;padding:15px 17px;border-radius:16px;background:#edf4ef;margin-bottom:14px}.hero img{width:58px;height:58px}.hero strong{display:block;margin-bottom:4px}.pane[hidden]{display:none}.section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.section-head h2{margin:0}.empty{padding:22px;text-align:center;color:#75827c;background:#fafbf8;border-radius:14px}.field-label{display:block;font-size:13px;color:#697873;margin:12px 0 5px}.wide{width:100%;margin-top:12px}.event-list{max-height:350px;overflow:auto}@media(max-width:800px){body{padding:18px 14px}.grid{grid-template-columns:1fr}.nav{position:sticky;top:0;background:#f6f5f1;padding:6px 0;z-index:2}.nav button{flex:1;padding:9px 4px}.chat{min-height:420px}.top{align-items:flex-start}}
+.avatar{display:inline-flex;width:58px;height:58px;border-radius:50%;flex-shrink:0}
+.avatar svg{width:100%;height:100%;display:block;animation:breathe 3.6s ease-in-out infinite}
+@keyframes breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.03)}}
+#eyeL,#eyeR,#mouth,#chinDot{transform-box:fill-box;transform-origin:center}
+#eyeL,#eyeR{animation:blink 5.2s infinite}
+@keyframes blink{0%,92%,100%{transform:scaleY(1)}95%{transform:scaleY(.08)}}
+.avatar[data-state=listening]{animation:pulseListen 1.6s ease-out infinite}
+.avatar[data-state=listening] #eyeL,.avatar[data-state=listening] #eyeR{animation:none;transform:scale(1.2)}
+@keyframes pulseListen{0%{box-shadow:0 0 0 0 rgba(22,125,114,.4)}100%{box-shadow:0 0 0 13px rgba(22,125,114,0)}}
+.avatar[data-state=thinking] #eyeL,.avatar[data-state=thinking] #eyeR{animation:none;opacity:.72}
+.avatar[data-state=thinking] #chinDot{animation:dotFlow 1.1s ease-in-out infinite}
+@keyframes dotFlow{0%,100%{opacity:.25}50%{opacity:1}}
+.avatar[data-state=speaking]{animation:pulseSpeak 1.3s ease-out infinite}
+.avatar[data-state=speaking] #mouth{animation:talk .26s ease-in-out infinite alternate}
+@keyframes talk{from{transform:scaleY(1)}to{transform:scaleY(2)}}
+@keyframes pulseSpeak{0%{box-shadow:0 0 0 0 rgba(122,196,170,.5)}100%{box-shadow:0 0 0 10px rgba(122,196,170,0)}}
+.avatar[data-state=reminder]{animation:pulseWarm 1.4s ease-out infinite}
+@keyframes pulseWarm{0%{box-shadow:0 0 0 0 rgba(232,154,108,.55)}100%{box-shadow:0 0 0 13px rgba(232,154,108,0)}}
+@media (prefers-reduced-motion: reduce){.avatar,.avatar svg,.avatar *{animation:none!important}}
+.member-list{display:flex;flex-direction:column;gap:2px;margin:6px 0 14px}
+.member-card{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:11px 2px;border-bottom:1px solid #edf0eb}
+.member-card .member-name{font-weight:600}
+.member-actions{display:flex;gap:6px;flex-shrink:0}
+.member-actions button{padding:7px 10px;min-height:36px}
+#enrollPreview{object-fit:cover;margin-top:10px}
+</style></head><body><header class="top"><div class="brand"><img src="/static/robot-avatar.svg" alt="阿伴机器人形象"><div><h1>阿伴</h1><div class="sub">你的家庭小助手</div></div></div><div id="todayLabel" class="small"></div></header>
+<section class="status" aria-label="当前说话人"><strong id="speakerLabel">正在读取当前身份…</strong><div class="row speaker-controls"><label for="speakerSelect" class="small">切换成员</label><select id="speakerSelect" aria-label="当前成员"><option value="">访客</option></select><button id="applySpeaker" class="secondary">开始聊天</button><button id="identifySpeaker" class="secondary">用人脸识别</button></div><div id="speakerHint" class="small" role="status">识别照片仅在本机处理；对话只使用成员姓名。换人时请重新识别或选择成员。</div></section>
+<nav class="nav" aria-label="主导航"><button class="active" data-pane="homePane">陪伴</button><button data-pane="reminderPane">提醒</button><button data-pane="familyPane">家庭</button><button data-pane="settingsPane">设置</button></nav>
+<main id="homePane" class="pane grid"><section class="card chat"><div class="hero"><span class="avatar" id="avatar" data-state="idle" role="img" aria-label="阿伴机器人形象"><svg viewBox="0 0 440 440"><defs><radialGradient id="haloG"><stop offset="0" stop-color="#fff8e9"/><stop offset=".64" stop-color="#e7f4ef"/><stop offset="1" stop-color="#f4f7f1"/></radialGradient><linearGradient id="bodyG" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fffefa"/><stop offset="1" stop-color="#e9efea"/></linearGradient><linearGradient id="faceG" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#174747"/><stop offset="1" stop-color="#0e3435"/></linearGradient></defs><circle cx="220" cy="220" r="202" fill="url(#haloG)"/><ellipse cx="220" cy="373" rx="132" ry="20" fill="#88ada3" opacity=".18"/><path d="M220 79v-20" stroke="#769d93" stroke-width="10" stroke-linecap="round"/><circle cx="220" cy="53" r="13" fill="#f0ae83" stroke="#fff" stroke-width="6"/><rect x="75" y="98" width="290" height="240" rx="103" fill="url(#bodyG)" stroke="#d5e2db" stroke-width="4"/><rect x="91" y="139" width="258" height="155" rx="72" fill="url(#faceG)"/><ellipse id="eyeL" cx="162" cy="207" rx="13" ry="22" fill="#a9f2db"/><ellipse id="eyeR" cx="278" cy="207" rx="13" ry="22" fill="#a9f2db"/><path id="mouth" d="M197 248q23 17 46 0" fill="none" stroke="#a9f2db" stroke-width="7" stroke-linecap="round"/><ellipse cx="114" cy="274" rx="16" ry="8" fill="#f0ae83" opacity=".54"/><ellipse cx="326" cy="274" rx="16" ry="8" fill="#f0ae83" opacity=".54"/><circle id="chinDot" cx="220" cy="317" r="6" fill="#a2c9b7"/></svg></span><div><strong id="heroTitle">我在这里</strong><span class="small" id="heroHint">可以和我聊天，也可以说出要记住的事。</span></div></div><div class="section-head"><h2>和阿伴说话</h2><button id="clearConversation" class="secondary">新对话</button></div><div id="messages" class="messages"><div class="msg bot">你好，我可以和你聊天，也可以帮你设置提醒。</div></div><div class="row"><input id="chatInput" placeholder="试试：一分钟后提醒我喝水" autocomplete="off"><button id="micBtn" class="secondary" title="开始语音输入">🎙️ 开始说</button><button id="voiceRetake" class="secondary" hidden>重录</button><button id="sendBtn">发送</button></div><div class="row"><label class="small"><input id="autoSpeak" type="checkbox" checked style="width:auto">自动朗读</label><button id="stopVoice" class="secondary">停止播放</button><button id="replayVoice" class="secondary">重播回答</button><button id="cancelReply" class="secondary" hidden>取消回答</button><button id="testVoice" class="secondary">试听</button></div><div id="requestStatus" class="small" role="status"></div><div id="latency" class="small"></div><div id="playbackStatus" class="small" role="status"></div><div id="voiceStatus" class="small">点击“开始说”录音，“停止听”后识别文字出现在输入框，可修改后发送。连续对话会记住本次会话。</div></section><aside class="card"><div class="section-head"><h2>接下来</h2><button class="secondary" data-goto="reminderPane">全部提醒</button></div><div id="nextReminder" class="empty">正在加载提醒…</div><p class="small">可以说“一分钟后提醒我喝水”，也可以问时间、天气。</p></aside></main>
+<main id="reminderPane" class="pane" hidden><section class="card"><div class="section-head"><h2>提醒</h2><span class="small">确认后保存，到点尝试播放</span></div><form id="reminderForm"><label class="field-label" for="reminderText">提醒内容</label><input id="reminderText" placeholder="例如：练琴、吃药、接孩子" maxlength="300" required><label class="field-label" for="reminderScope">提醒归属</label><select id="reminderScope"><option value="personal">当前成员</option><option value="household">家庭共享</option></select><label class="field-label" for="due">提醒时间</label><input id="due" type="datetime-local" required><div class="row"><button type="submit">创建提醒</button><span id="reminderFormStatus" class="small" role="status"></span></div></form><h2 style="margin-top:26px">待提醒</h2><div id="reminders">加载中…</div></section></main>
+<main id="familyPane" class="pane" hidden><section class="card"><h2>家庭成员</h2><div id="memberList" class="member-list">加载中…</div><p class="small">按需打开摄像头，拍照后识别已录入的家人。照片仅在本机处理；删除成员会移除本机保存的人脸特征。</p><video id="camera" class="camera" autoplay muted playsinline hidden></video><canvas id="snapshot" hidden></canvas><img id="enrollPreview" class="camera" hidden alt="录入照片预览"><div class="row"><button id="startCamera" class="secondary">打开摄像头</button><button id="recognize">识别并开始聊天</button></div><div class="row"><input id="personName" placeholder="姓名（注册时填写）"><button id="capturePreview" class="secondary">拍摄预览</button></div><div class="row" id="enrollActions" hidden><button id="enrollRetake" class="secondary">重拍</button><button id="enroll">确认录入并开始聊天</button></div><div id="visionStatus" class="status">摄像头关闭中；只有点击按钮后才会开启。</div></section></main>
+<main id="settingsPane" class="pane" hidden><div class="grid"><section class="card"><h2>阿伴的声音</h2><p class="small">选择一种家人喜欢的中文音色。更换后立刻生效，只保存在这台电脑上。</p><label class="field-label" for="ttsVoiceSelect">中文音色</label><div class="row"><select id="ttsVoiceSelect" aria-label="选择机器人中文音色" style="flex:1"><option>正在读取音色…</option></select><button id="settingsTestVoice" class="secondary">试听</button></div><div id="voicePreferenceStatus" class="status" role="status">当前默认：女声 001</div><div id="systemStatus" class="status">检查服务中…</div></section><section class="card"><h2>最近状态</h2><div id="events" class="small event-list">加载中…</div></section></div></main>
+<dialog id="editReminderDialog"><form id="editReminderForm" method="dialog" class="card"><h2>修改提醒</h2><input type="hidden" id="editReminderId"><label class="field-label" for="editReminderText">提醒内容</label><input id="editReminderText" maxlength="300" required><label class="field-label" for="editReminderDue">提醒时间</label><input id="editReminderDue" type="datetime-local" required><div class="row"><button id="saveReminderEdit" type="button">保存修改</button><button class="secondary" value="cancel">返回</button></div><div id="editReminderStatus" class="small" role="status"></div></form></dialog>
+<script>
+const $=id=>document.getElementById(id); const messages=$('messages');
+// 机器人五状态（产品方案 v1）：待命/倾听/思考/说话/提醒，共用同一形象，动画+文案变化。
+const avatar=$('avatar'),heroTitle=$('heroTitle'),heroHint=$('heroHint');
+const STATE_TEXT={idle:['我在这里','可以和我聊天，也可以说出要记住的事。'],listening:['正在听','对准麦克风说话，说完点击“停止听”。'],thinking:['正在整理回答','稍等一下…'],speaking:['正在说话','想打断就点“停止播放”。'],reminder:['有一件事要提醒你','到点的提醒刚刚播放过了。']};
+let robotState='idle',reminderTimer=null,playbackPending=0;
+function setRobotState(state,hint){
+  robotState=state;avatar.dataset.state=state;
+  const text=STATE_TEXT[state]||STATE_TEXT.idle;
+  heroTitle.textContent=text[0];heroHint.textContent=hint||text[1];
+}
+function flashReminder(reminderText){
+  if(robotState!=='idle')return;// 对话、录音中不打断；提醒已有列表和事件可查
+  setRobotState('reminder',reminderText?'提醒你：'+reminderText:undefined);
+  clearTimeout(reminderTimer);
+  reminderTimer=setTimeout(()=>{if(robotState==='reminder')setRobotState('idle')},10000);
+}
+function addMsg(text,who='bot'){const d=document.createElement('div');d.className='msg '+who;d.textContent=text;messages.appendChild(d);messages.scrollTop=messages.scrollHeight}
+let speechEpoch=0, speechChain=Promise.resolve(), currentAudio=null, releasePlayback=null;
+const speechRequests=new Set();
+let turnStartedAt=0, firstAudioLogged=false;
+function stopVoice(){speechEpoch++;speechRequests.forEach(c=>{try{c.abort()}catch(e){}});speechRequests.clear();currentAudio?.pause();if(releasePlayback)releasePlayback();currentAudio=null;speechChain=Promise.resolve();playbackPending=0;if('speechSynthesis' in window)speechSynthesis.cancel();if(robotState==='speaking')setRobotState('idle')}
+function browserSpeak(text,epoch){return new Promise((resolve,reject)=>{if(epoch!==speechEpoch)return resolve();if(!('speechSynthesis' in window))return reject(Error('当前浏览器无法播放语音'));const voices=speechSynthesis.getVoices();const chinese=voices.find(v=>/^zh[-_]CN$/i.test(v.lang))||voices.find(v=>/^zh/i.test(v.lang));if(!chinese)return reject(Error('没有可用的中文音色，请启用本地中文语音'));const u=new SpeechSynthesisUtterance(text);u.voice=chinese;u.lang='zh-CN';u.rate=1;u.onend=resolve;u.onerror=()=>reject(Error('中文语音播放失败'));releasePlayback=resolve;speechSynthesis.speak(u)})}
+function say(text){if(!$('autoSpeak').checked||!text.trim())return;scheduleSpeech(text,speechEpoch)}
+// 句子级预取：收到句子立刻发起 TTS 请求（并行合成），播放按顺序排队。
+// 旧实现串行等待（上一句放完才开始下一句合成），句间空档 = 整句合成耗时。
+function scheduleSpeech(text,epoch){
+  playbackPending++;
+  const ctrl=new AbortController();speechRequests.add(ctrl);
+  const timer=setTimeout(()=>{try{ctrl.abort()}catch(e){}},20000);
+  const fetchTask=fetch('/api/voice/audio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text}),signal:ctrl.signal}).then(async r=>{if(!r.ok)throw Error('HTTP '+r.status);return await r.blob()}).finally(()=>{clearTimeout(timer);speechRequests.delete(ctrl)});
+  fetchTask.catch(()=>{});// 预取失败留到播放段处理（回退浏览器音色），这里只防未处理 rejection
+  speechChain=speechChain.then(async()=>{
+    try{
+    if(epoch!==speechEpoch)return;
+    let url;
+    try{
+      let blob;
+      try{blob=await fetchTask}catch(e){
+        if(epoch!==speechEpoch||e.name==='AbortError')return;
+        $('playbackStatus').textContent='本地语音不可用，尝试浏览器中文音色';
+        if(robotState!=='listening')setRobotState('speaking');
+        await browserSpeak(text,epoch);return;
+      }
+      if(epoch!==speechEpoch)return;
+      url=URL.createObjectURL(blob);const audio=new Audio(url);currentAudio=audio;
+      if(!firstAudioLogged&&turnStartedAt){firstAudioLogged=true;$('latency').textContent=($('latency').textContent?$('latency').textContent+' · ':'')+'首响 '+((performance.now()-turnStartedAt)/1000).toFixed(1)+' 秒'}
+      $('playbackStatus').textContent='正在播放中文语音';
+      if(robotState!=='listening')setRobotState('speaking');
+      await new Promise((resolve,reject)=>{releasePlayback=resolve;audio.onended=resolve;audio.onerror=()=>reject(Error('音频播放失败'));audio.play().catch(()=>reject(Error('浏览器阻止了播放，请点击“重播回答”')))});
+      if(epoch===speechEpoch)$('playbackStatus').textContent='语音播放完毕';
+    }catch(e){if(epoch===speechEpoch&&e.name!=='AbortError')$('playbackStatus').textContent=e.message}
+    finally{if(url)URL.revokeObjectURL(url);if(epoch===speechEpoch){currentAudio=null;releasePlayback=null}}
+    }finally{
+      playbackPending=Math.max(0,playbackPending-1);
+      if(playbackPending===0&&robotState==='speaking')setRobotState('idle');
+    }
+  })
+}
+$('stopVoice').onclick=()=>{stopVoice();$('playbackStatus').textContent='语音已停止'};
+$('autoSpeak').onchange=()=>{if(!$('autoSpeak').checked)stopVoice()};
+$('testVoice').onclick=()=>{stopVoice();$('autoSpeak').checked=true;say('你好，我是你的家庭小助手。明天晚上八点半，我会提醒你练琴。')};
+
+let busy=false,lastReply='',activeCommand=null;let sessionId=localStorage.getItem('robotConversationId');if(!sessionId){sessionId=crypto.randomUUID();localStorage.setItem('robotConversationId',sessionId)}
+let speaker=null,identityBusy=false;
+function scopedUrl(path){return path+(path.includes('?')?'&':'?')+'session_id='+encodeURIComponent(sessionId)+'&identity_revision='+speaker.revision}
+function sameSpeaker(revision){return speaker&&speaker.revision===revision}
+function applyIdentity(next,announce=false){
+  const changed=speaker&&speaker.revision!==next.revision;
+  const firstLoad=!speaker;speaker=next;$('speakerLabel').textContent=next.person?'正在和 '+next.person.name+' 聊天':'访客聊天 · 尚未确认身份';
+  if(changed||firstLoad)$('speakerSelect').value=next.person?String(next.person.id):'';
+  $('reminderScope').options[0].disabled=!next.person;
+  if(changed||firstLoad)$('reminderScope').value=next.person?'personal':'household';
+  if(changed){
+    stopVoice();stopListening();voiceFinal='';$('chatInput').value='';lastReply='';messages.replaceChildren();
+    $('editReminderDialog').close();$('reminderText').value='';$('due').value='';
+    $('requestStatus').textContent='';$('latency').textContent='';$('playbackStatus').textContent='';$('reminderFormStatus').textContent='';
+    addMsg(next.person?'你好，'+next.person.name+'。我们可以接着聊。':'已切换到访客聊天。你可以选择成员，让我接续你的记忆。');
+    $('events').replaceChildren();$('reminders').replaceChildren();$('nextReminder').textContent='正在加载提醒…';
+  }
+  if(announce){const greeting=next.person?'你好，'+next.person.name+'。我在听。':'现在是访客聊天。';say(greeting)}
+  $('speakerHint').textContent=next.person?'本次对话和个人提醒归属于'+next.person.name+'；换人请切换成员。':'访客不读取家庭成员的个人记忆；可以聊天或设置家庭共享提醒。';
+}
+async function loadPeople(){const r=await fetch('/api/people');if(!r.ok)throw Error('成员列表加载失败');const members=await r.json();$('speakerSelect').replaceChildren(new Option('访客',''));members.forEach(p=>$('speakerSelect').append(new Option(p.name,String(p.id))));if(speaker)$('speakerSelect').value=speaker.person?String(speaker.person.id):'';renderMembers(members)}
+async function loadIdentity(){
+  const r=await fetch('/api/conversations/'+encodeURIComponent(sessionId)+'/identity');if(!r.ok)throw Error('当前身份加载失败');const next=await r.json();
+  if(busy||identityBusy)return;
+  applyIdentity(next);
+}
+async function chooseSpeaker(personId){
+  if(busy||listening)throw Error('请先结束当前回答或录音，再切换成员');
+  const r=await fetch('/api/conversations/'+encodeURIComponent(sessionId)+'/identity',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({person_id:personId,revision:speaker.revision})});
+  const d=await r.json();if(!r.ok)throw Error(d.detail||'切换失败');applyIdentity(d,true);loadReminders();loadDrafts();loadEvents();
+}
+$('applySpeaker').onclick=async()=>{if(!speaker||identityBusy)return;identityBusy=true;try{await chooseSpeaker($('speakerSelect').value?Number($('speakerSelect').value):null)}catch(e){$('speakerHint').textContent=e.message}finally{identityBusy=false}};
+$('identifySpeaker').onclick=()=>{showPane('familyPane');$('visionStatus').textContent='请打开摄像头，点击“识别并开始聊天”。照片仅在本机处理。'};
+function confirmation(data){
+  document.querySelectorAll('.draft-actions').forEach(node=>node.remove());
+  const card=document.createElement('div');card.className='draft-actions status';card.dataset.source=data.source||'harness';
+  const label=document.createElement('div');
+  const render=()=>label.textContent='待确认：'+new Date(data.due_at).toLocaleString()+' · '+data.text+' · '+(data.person_id?(speaker.person?.name||'个人'):'家庭共享');
+  render();card.append(label);
+  const actions=document.createElement('div');actions.className='row';
+  const b=document.createElement('button');b.textContent='确认提醒';
+  const owner=sessionId;const identityRevision=speaker.revision;
+  b.onclick=async()=>{
+    if(busy||identityBusy||!sameSpeaker(identityRevision))return;
+    b.disabled=true;
+    try{
+      const url=data.draft_id?'/api/reminder-drafts/'+data.draft_id+'/confirm':'/api/reminders';
+      const payload=data.draft_id?{session_id:owner,revision:data.revision,identity_revision:identityRevision}:{text:data.text,due_at:data.due_at};
+      const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      const body=await r.json();if(!r.ok)throw Error(body.detail||'提醒保存失败');
+      const text='好的，提醒已经记下了。';addMsg(text);say(text);lastReply=text;card.remove();loadReminders();
+    }catch(e){addMsg(e.message);b.disabled=false;loadDrafts()}
+  };
+  const edit=document.createElement('button');edit.className='secondary';edit.textContent='修改时间或内容';
+  edit.onclick=()=>{
+    if(busy||identityBusy||!sameSpeaker(identityRevision))return;
+    openReminderEditor({id:'',text:data.text,due_at:data.due_at},true,async updated=>{
+      if(data.draft_id){
+        const r=await fetch('/api/reminder-drafts/'+data.draft_id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({...updated,session_id:owner,revision:data.revision,identity_revision:identityRevision})});
+        const body=await r.json();if(!r.ok)throw Error(body.detail||'修改失败');Object.assign(data,body);
+      }else Object.assign(data,updated);
+      render();
+    });
+  };
+  actions.append(b,edit);card.append(actions);messages.append(card);messages.scrollTop=messages.scrollHeight;
+}
+async function loadDrafts(){
+  if(busy||!speaker||$('editReminderDialog').open)return;
+  const owner=sessionId;const identityRevision=speaker.revision;
+  try{
+    const r=await fetch('/api/conversations/'+encodeURIComponent(owner)+'/drafts');
+    if(!r.ok)return;
+    const drafts=await r.json();if(owner!==sessionId||busy||!sameSpeaker(identityRevision))return;
+    document.querySelectorAll('.draft-actions[data-source="harness"]').forEach(node=>node.remove());
+    drafts.forEach(d=>confirmation({...d,draft_id:d.id}));
+  }catch(e){}
+}
+async function send(){
+  const text=$('chatInput').value.trim();if(!text||busy||identityBusy||!speaker)return;
+  stopVoice();addMsg(text,'user');$('chatInput').value='';busy=true;
+  document.querySelectorAll('.draft-actions button').forEach(b=>b.disabled=true);
+  $('sendBtn').disabled=true;$('micBtn').disabled=true;$('cancelReply').hidden=false;$('latency').textContent='';
+  const started=performance.now();turnStartedAt=started;firstAudioLogged=false;let bot=null,pendingSpeech='',buffer='',finished=false,first=true,taskLabel='正在理解你的话';
+  lastReply='';activeCommand=new AbortController();
+  const totalTimer=setTimeout(()=>activeCommand?.abort(),75000);
+  const timer=setInterval(()=>{$('requestStatus').textContent=taskLabel+' · '+((performance.now()-started)/1000).toFixed(1)+' 秒'},100);
+  function handle(data){
+    if(data.type==='status'){taskLabel=data.message}
+    else if(data.type==='delta'){
+      if(!bot){addMsg('');bot=messages.lastChild}
+      lastReply+=data.text;bot.textContent=lastReply;messages.scrollTop=messages.scrollHeight;
+      if(first){first=false;$('latency').textContent='思考 '+((performance.now()-started)/1000).toFixed(1)+' 秒';if(!$('autoSpeak').checked)setRobotState('idle')}
+      taskLabel='正在接收回答';pendingSpeech+=data.text;
+      while(true){const m=pendingSpeech.match(/^([\s\S]{5,}?[。！？!?\n])/);if(!m)break;say(m[1]);pendingSpeech=pendingSpeech.slice(m[1].length)}
+    }else if(data.type==='result'){
+      if(data.source!=='harness'){addMsg(data.message);say(data.message);lastReply=data.message}
+      confirmation(data);
+    }else if(data.type==='error'){throw Error(data.message)}
+    else if(data.type==='done'){
+      finished=true;if(pendingSpeech.trim())say(pendingSpeech);pendingSpeech='';taskLabel='回答完成';
+    }
+  }
+  try{
+    $('requestStatus').textContent='正在理解你的话…';setRobotState('thinking');
+    const r=await fetch('/api/command/stream?text='+encodeURIComponent(text)+'&session_id='+encodeURIComponent(sessionId)+'&identity_revision='+speaker.revision,{method:'POST',signal:activeCommand.signal});
+    if(!r.ok){const d=await r.json();throw Error(typeof d.detail==='string'?d.detail:'请求失败')}
+    const reader=r.body.getReader(),decoder=new TextDecoder();
+    try{
+      while(true){
+        const {value,done}=await reader.read();buffer+=decoder.decode(value||new Uint8Array(),{stream:!done});let split;
+        while((split=buffer.indexOf('\n\n'))>=0){
+          const event=buffer.slice(0,split);buffer=buffer.slice(split+2);
+          const line=event.split('\n').find(x=>x.startsWith('data: '));if(line)handle(JSON.parse(line.slice(6)));
+        }
+        if(done)break;
+      }
+      if(!finished)throw Error('回答中断，请重试');
+    }catch(e){await reader.cancel().catch(()=>{});throw e}finally{reader.releaseLock()}
+    $('requestStatus').textContent='回答完成 · '+((performance.now()-started)/1000).toFixed(1)+' 秒';
+  }catch(e){
+    stopVoice();const message=e.name==='AbortError'?'已停止等待。已保存的提醒可以在提醒页查看。':e.message;
+    addMsg(message);$('requestStatus').textContent=message;
+  }finally{
+    clearTimeout(totalTimer);clearInterval(timer);busy=false;activeCommand=null;
+    if(robotState==='thinking'&&playbackPending===0)setRobotState('idle');
+    $('sendBtn').disabled=false;$('micBtn').disabled=micMode===null;$('cancelReply').hidden=true;
+    refresh();
+  }
+}
+$('sendBtn').onclick=send;$('chatInput').onkeydown=e=>{if(e.key==='Enter'&&!e.isComposing)send()};
+$('cancelReply').onclick=()=>{activeCommand?.abort();stopVoice()};
+$('clearConversation').onclick=async()=>{
+  if(busy||identityBusy||!speaker)return;
+  if(speaker.person&&!confirm('开启新对话会重置'+speaker.person.name+'的对话记忆，已保存提醒仍保留。继续吗？'))return;
+  try{
+    const r=await fetch(scopedUrl('/api/conversations/'+encodeURIComponent(sessionId)),{method:'DELETE'});
+    if(!r.ok){const d=await r.json();throw Error(d.detail||'新对话创建失败')}
+    await loadDrafts();
+    messages.replaceChildren();addMsg('好，我们开始一个新对话。');$('requestStatus').textContent='已开启新对话';lastReply='';stopVoice();
+  }catch(e){$('requestStatus').textContent=e.message}
+};
+$('replayVoice').onclick=()=>{if(lastReply){stopVoice();$('autoSpeak').checked=true;say(lastReply)}};
+
+function localDateInput(value){const d=new Date(value);const p=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`}
+function openReminderEditor(item,isDraft=false,onDraftSave=null){$('editReminderId').value=isDraft?'draft':item.id;$('editReminderText').value=item.text;$('editReminderDue').value=localDateInput(item.due_at);$('editReminderDue').dataset.original=item.due_at;$('editReminderStatus').textContent='';draftEditCallback=onDraftSave;$('editReminderDialog').showModal()}
+let draftEditCallback=null;
+let lastFlashedEventId=0;
+function reminderRow(item){const row=document.createElement('div');row.className='reminder';const details=document.createElement('span');const dt=new Date(item.due_at);details.textContent=`${dt.toLocaleDateString()} ${dt.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})} · ${item.text} · ${item.person_name||'家庭共享'}`;if(dt<=new Date()){const late=document.createElement('div');late.className='small warn';late.textContent='已过设定时间，仍在等待播放';details.append(late)}const actions=document.createElement('div');actions.className='reminder-actions';const edit=document.createElement('button');edit.className='secondary';edit.textContent='修改';edit.onclick=()=>openReminderEditor(item);const cancel=document.createElement('button');cancel.className='secondary';cancel.textContent='取消';cancel.onclick=()=>cancelReminder(item.id);actions.append(edit,cancel);row.append(details,actions);return row}
+async function loadReminders(){if(!speaker)return;const revision=speaker.revision;try{const r=await fetch(scopedUrl('/api/reminders'));if(!r.ok)throw Error();const a=await r.json();if(!sameSpeaker(revision))return;const list=$('reminders');list.replaceChildren();if(!a.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='还没有待提醒的事';list.append(empty)}else a.forEach(x=>list.append(reminderRow(x)));const next=$('nextReminder');if(next){next.replaceChildren();if(a.length){const upcoming=a[0];const dt=new Date(upcoming.due_at);const strong=document.createElement('strong');strong.textContent=dt.toLocaleDateString(undefined,{month:'long',day:'numeric'})+' '+dt.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});const label=document.createElement('div');label.textContent=upcoming.text+' · '+(upcoming.person_name||'家庭共享');next.className='status'+(dt<=new Date()?' warn':'');if(dt<=new Date())strong.textContent+=' · 等待播放';next.append(strong,label)}else{next.className='empty';next.textContent='今天还没有安排'}}}catch(e){$('reminders').textContent='提醒暂时加载失败，请刷新重试';if($('nextReminder'))$('nextReminder').textContent='提醒加载失败'}}
+async function cancelReminder(id){if(!confirm('确定取消这条提醒吗？'))return;try{const r=await fetch(scopedUrl('/api/reminders/'+id),{method:'DELETE'});if(!r.ok)throw Error('取消失败，请刷新后重试');await loadReminders()}catch(e){$('reminderFormStatus').textContent=e.message}}
+$('reminderForm').onsubmit=async e=>{e.preventDefault();if(!speaker||identityBusy)return;const status=$('reminderFormStatus'),text=$('reminderText').value.trim(),when=new Date($('due').value);if(!text||Number.isNaN(when.getTime())){status.textContent='请填写提醒内容和时间';return}if(when<=new Date()){status.textContent='提醒时间要晚于现在';return}try{const r=await fetch(scopedUrl('/api/reminders'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,due_at:when.toISOString(),scope:$('reminderScope').value})});const body=await r.json();if(!r.ok)throw Error(body.detail||'创建失败');$('reminderText').value='';$('due').value='';status.textContent='提醒已创建';addMsg('提醒已经创建：'+text);await loadReminders()}catch(err){status.textContent=err.message}}
+$('saveReminderEdit').onclick=async()=>{const id=$('editReminderId').value,text=$('editReminderText').value.trim(),when=new Date($('editReminderDue').value===localDateInput($('editReminderDue').dataset.original)?$('editReminderDue').dataset.original:$('editReminderDue').value),status=$('editReminderStatus');if(!text||Number.isNaN(when.getTime())||when<=new Date()){status.textContent='请填写内容，并选择未来时间';return}try{if(id==='draft'){await draftEditCallback?.({text,due_at:when.toISOString()});$('editReminderDialog').close();return}const r=await fetch(scopedUrl('/api/reminders/'+id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,due_at:when.toISOString(),scope:$('reminderScope').value})});const body=await r.json();if(!r.ok)throw Error(body.detail||'保存失败');$('editReminderDialog').close();await loadReminders()}catch(e){status.textContent=e.message}}
+let stream;async function openCamera(){try{stream=await navigator.mediaDevices.getUserMedia({video:true});$('camera').hidden=false;$('camera').srcObject=stream;$('visionStatus').textContent='摄像头已打开，可以识别或注册';$('visionStatus').className='status ok'}catch(e){$('visionStatus').textContent='无法打开摄像头：'+e.message;$('visionStatus').className='status warn'}}$('startCamera').onclick=openCamera;
+async function photo(endpoint,extra={}){if(!stream)throw Error('请先打开摄像头');const v=$('camera'),c=$('snapshot');c.width=v.videoWidth;c.height=v.videoHeight;c.getContext('2d').drawImage(v,0,0);const blob=await new Promise(ok=>c.toBlob(ok,'image/jpeg',.9));const f=new FormData();f.append('image',blob,'camera.jpg');Object.entries(extra).forEach(([k,v])=>f.append(k,v));const r=await fetch(endpoint,{method:'POST',body:f});const data=await r.json();if(!r.ok)throw Error(data.detail||'视觉处理失败');return data}
+$('recognize').onclick=async()=>{
+  if(busy||identityBusy||listening||!speaker){$('visionStatus').textContent='请先结束当前对话或录音';return}
+  identityBusy=true;
+  try{const d=await photo('/api/faces/recognize',{session_id:sessionId,identity_revision:speaker.revision});applyIdentity(d.identity,true);$('visionStatus').textContent=d.message;$('visionStatus').className='status'+(d.needs_selection?' warn':' ok');await loadPeople();loadReminders();loadDrafts();if(!d.needs_selection)showPane('homePane')}
+  catch(e){$('visionStatus').textContent=e.message;$('visionStatus').className='status warn'}finally{identityBusy=false}
+};
+let enrollBlob=null,lastPreviewUrl=null;
+function resetEnrollPreview(){enrollBlob=null;if(lastPreviewUrl){URL.revokeObjectURL(lastPreviewUrl);lastPreviewUrl=null}const img=$('enrollPreview');img.hidden=true;img.removeAttribute('src');$('enrollActions').hidden=true}
+function capturePreview(){
+  if(!stream){$('visionStatus').textContent='请先打开摄像头，再点击“拍摄预览”';return}
+  const v=$('camera'),c=$('snapshot');c.width=v.videoWidth;c.height=v.videoHeight;c.getContext('2d').drawImage(v,0,0);
+  c.toBlob(blob=>{
+    if(!blob){$('visionStatus').textContent='拍摄失败，请重试';return}
+    enrollBlob=blob;
+    if(lastPreviewUrl)URL.revokeObjectURL(lastPreviewUrl);
+    lastPreviewUrl=URL.createObjectURL(blob);
+    const img=$('enrollPreview');img.src=lastPreviewUrl;img.hidden=false;
+    $('enrollActions').hidden=false;
+    $('visionStatus').textContent='请检查预览：一人入镜、脸部正对、光线充足。填写姓名后点击“确认录入”；不满意点“重拍”。';
+  },'image/jpeg',.9);
+}
+function memberCard(p){
+  const card=document.createElement('div');card.className='member-card';
+  const name=document.createElement('span');name.className='member-name';name.textContent=p.name;
+  const actions=document.createElement('div');actions.className='member-actions';
+  const re=document.createElement('button');re.className='secondary';re.textContent='重新录脸';
+  re.onclick=()=>{
+    $('personName').value=p.name;resetEnrollPreview();
+    $('visionStatus').textContent='正在为'+p.name+'重新录脸：拍摄预览并确认录入即可，成员编号和记忆会保留。';
+    if(!stream)openCamera();
+  };
+  const del=document.createElement('button');del.className='secondary';del.textContent='删除';
+  del.onclick=async()=>{
+    if(busy||identityBusy)return;
+    if(!confirm('删除 '+p.name+' 吗？本机保存的人脸特征会被移除，无法恢复。'))return;
+    if(!confirm('再次确认：删除 '+p.name+'？之后同名重新录入将作为新成员。'))return;
+    del.disabled=true;
+    try{
+      const r=await fetch('/api/people/'+p.id,{method:'DELETE'});
+      const body=await r.json().catch(()=>({}));
+      if(!r.ok)throw Error(body.detail||'删除失败，请重试');
+      $('visionStatus').textContent='已删除 '+p.name+'。';$('visionStatus').className='status';
+      resetEnrollPreview();
+      await loadPeople();loadReminders();loadDrafts();await loadIdentity();loadEvents();
+    }catch(e){$('visionStatus').textContent=e.message;$('visionStatus').className='status warn';del.disabled=false}
+  };
+  actions.append(re,del);card.append(name,actions);return card;
+}
+function renderMembers(members){
+  const list=$('memberList');list.replaceChildren();
+  if(!members.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='还没有录入成员';list.append(empty);return}
+  members.forEach(p=>list.append(memberCard(p)));
+}
+$('enroll').onclick=async()=>{
+  if(busy||identityBusy||listening)return;
+  const name=$('personName').value.trim();
+  if(!name){$('visionStatus').textContent='请先填写姓名';return}
+  if(!enrollBlob){$('visionStatus').textContent='请先点击“拍摄预览”，确认照片后再录入';return}
+  identityBusy=true;
+  try{
+    const f=new FormData();f.append('name',name);f.append('image',enrollBlob,'enroll.jpg');
+    const r=await fetch('/api/faces/enroll',{method:'POST',body:f});
+    const d=await r.json();if(!r.ok)throw Error(d.detail||'录入失败');
+    resetEnrollPreview();
+    await loadPeople();await chooseSpeaker(d.id);
+    $('visionStatus').textContent='已录入：'+d.name;$('visionStatus').className='status ok';showPane('homePane');
+  }catch(e){$('visionStatus').textContent=e.message;$('visionStatus').className='status warn'}finally{identityBusy=false}
+};
+$('capturePreview').onclick=capturePreview;
+$('enrollRetake').onclick=()=>{resetEnrollPreview();$('visionStatus').textContent='请重新拍摄预览';if(!stream)openCamera()};
+function showPane(id){document.querySelectorAll('.pane').forEach(p=>p.hidden=p.id!==id);document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.pane===id));if(id!=='familyPane'){resetEnrollPreview();if(stream){stream.getTracks().forEach(t=>t.stop());stream=null;$('camera').srcObject=null;$('camera').hidden=true;$('visionStatus').textContent='摄像头已关闭';$('visionStatus').className='status'}}if(id==='reminderPane')loadReminders()}
+document.querySelectorAll('.nav button').forEach(b=>b.onclick=()=>showPane(b.dataset.pane));document.querySelectorAll('[data-goto]').forEach(b=>b.onclick=()=>showPane(b.dataset.goto));
+const today=new Date();$('todayLabel').textContent=today.toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'});$('due').min=localDateInput(new Date(Date.now()+60000));
+async function loadVoiceSettings(){try{const r=await fetch('/api/voice/settings');const d=await r.json();const select=$('ttsVoiceSelect');select.replaceChildren();if(!r.ok)throw Error(d.detail||'音色设置加载失败');if(!d.available_voices?.length){select.disabled=true;$('voicePreferenceStatus').textContent='本地中文语音未就绪，暂时无法切换音色';return}d.available_voices.forEach(v=>{const option=document.createElement('option');option.value=v.id;option.textContent=v.label;select.append(option)});select.value=d.voice;select.disabled=false;$('voicePreferenceStatus').textContent='当前使用：'+(select.selectedOptions[0]?.textContent||d.voice);select.onchange=async()=>{select.disabled=true;try{const saved=await fetch('/api/voice/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({voice:select.value})});const result=await saved.json();if(!saved.ok)throw Error(result.detail||'保存音色失败');$('voicePreferenceStatus').textContent='已保存并生效：'+(select.selectedOptions[0]?.textContent||result.voice)}catch(e){$('voicePreferenceStatus').textContent=e.message;await loadVoiceSettings()}finally{select.disabled=false}}}catch(e){$('voicePreferenceStatus').textContent=e.message}}
+$('settingsTestVoice').onclick=()=>{stopVoice();scheduleSpeech('你好，我是你的家庭小助手。明天晚上八点半，我会提醒你练琴。',speechEpoch)};loadVoiceSettings();
+async function loadEvents(){if(!speaker)return;const revision=speaker.revision;try{const r=await fetch(scopedUrl('/api/events'));if(!r.ok)return;const a=await r.json(),list=$('events');if(!sameSpeaker(revision))return;const latest=a[0];if(latest&&latest.type==='reminder_delivered'&&latest.id!==lastFlashedEventId&&(Date.now()-new Date(latest.created_at).getTime())<60000){lastFlashedEventId=latest.id;flashReminder(latest.payload&&latest.payload.text)}list.replaceChildren();if(!a.length){list.textContent='暂无事件';return}a.slice(0,8).forEach(x=>{const row=document.createElement('div');row.className='reminder';row.textContent=new Date(x.created_at).toLocaleTimeString()+' '+(x.payload.text||x.type);list.append(row)})}catch(e){$('events').textContent='状态暂时加载失败'}}
+async function health(){try{const d=await (await fetch('/api/health')).json();const states={configured:'已配置，尚未验证',available:'最近调用成功',timeout:'上次调用超时',error:'上次调用失败',not_configured:'未配置'};const voices={'bailian-zh-cloud':'百炼云端语音','kokoro-zh-local':'Kokoro 本地中文语音','argmax-zh-local':'Argmax 本地中文语音','macos-zh-system':'系统中文音色','browser-zh':'浏览器中文音色'};$('systemStatus').textContent='服务正常 · '+(d.agent_backend==='harness'?'Harness Agent':'原对话后端')+' · 模型：'+d.llm_model+'（'+(states[d.llm_status]||'待检查')+'） · 语音：'+(voices[d.voice]||d.voice)+' · 识别：'+(d.stt==='dashscope'?'服务端百炼':'浏览器')}catch(e){$('systemStatus').textContent='服务连接失败，请检查服务是否运行'}}
+async function refresh(){try{await loadIdentity();loadReminders();loadEvents();health();loadDrafts()}catch(e){$('speakerHint').textContent=e.message}}
+Promise.all([loadPeople(),loadIdentity()]).then(()=>{loadReminders();loadDrafts();loadEvents();health()}).catch(e=>$('speakerHint').textContent=e.message);setInterval(refresh,10000);
+let recognition=null, listening=false, manualStop=false, voiceFinal='';
+let micMode=null;
+const TARGET_RATE=16000, FLUSH_WAIT_MS=150;
+let audioCtx=null, workletNode=null, micStream=null, micSrc=null, micReady=false;
+let recording=false, recFrames=[], recBytes=0, lastLevel=null, zeroFrames=0, levelFrames=0, starting=false;
+function resetVoiceInput(){voiceFinal='';$('chatInput').value='';$('voiceStatus').textContent='准备好了，点击“开始说”';$('voiceRetake').hidden=true}
+function stopListening(){
+  if(recording){recording=false;listening=false;$('micBtn').textContent='🎙️ 开始说';$('micBtn').title='开始语音输入';$('sendBtn').disabled=false;return}
+  if(!recognition||!listening)return;
+  manualStop=true;recognition.stop();$('micBtn').textContent='🎙️ 开始说';$('micBtn').title='开始语音输入'}
+
+// 建一次麦克风音频图并长期复用（demo 2026-11-03 实测：反复 getUserMedia+close
+// 会撞上麦克风流变哑的竞态——worklet 照常发帧但逐采样点全零；复用同一张图从根上避开）。
+async function ensureMic(){
+  if(micReady&&audioCtx&&audioCtx.state!=='closed')return;
+  micStream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}});
+  audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+  await audioCtx.audioWorklet.addModule('/static/worklet.js');
+  micSrc=audioCtx.createMediaStreamSource(micStream);
+  workletNode=new AudioWorkletNode(audioCtx,'pcm-capture',{processorOptions:{targetRate:TARGET_RATE}});
+  workletNode.port.onmessage=e=>{
+    const d=e.data;
+    if(d&&d.level){lastLevel=d;if(recording)paintLevel();return}
+    if(recording){recFrames.push(new Int16Array(d));recBytes+=d.byteLength}
+  };
+  micSrc.connect(workletNode);
+  // 不直连 destination：扬声器输出==麦克风信号时，浏览器 AEC 会把用户自己的声音消掉。
+  // 经过 gain=0 节点：音频图不被优化掉，也不产生可当参考的输出（demo 实测教训）。
+  const silence=audioCtx.createGain();silence.gain.value=0;
+  workletNode.connect(silence);silence.connect(audioCtx.destination);
+  micReady=true;
+}
+async function startRec(){
+  if(recording||starting)return;
+  starting=true;
+  try{
+    stopVoice();// ★先停掉播放，否则 AI 自己的声音被麦克风采回去，识别出没说过的内容（demo 实测）
+    await ensureMic();
+    if(audioCtx.state==='suspended')await audioCtx.resume();
+    const tr=micStream&&micStream.getAudioTracks()[0];
+    if(tr&&(!tr.enabled||tr.muted||tr.readyState!=='live')){$('voiceStatus').textContent='⚠ 麦克风不可用，请刷新页面重试';return}
+    recording=true;listening=true;manualStop=false;recFrames=[];recBytes=0;zeroFrames=0;levelFrames=0;
+    setRobotState('listening');
+    $('micBtn').textContent='⏹ 停止听';$('micBtn').title='停止录音并识别';$('voiceRetake').hidden=false;$('sendBtn').disabled=true;
+    $('voiceStatus').textContent='正在录音，说完点击“停止听”';
+  }catch(e){
+    micReady=false;
+    $('voiceStatus').textContent='麦克风启动失败：'+e.message+'。可改用文字输入。';
+  }finally{starting=false}
+}
+function paintLevel(){
+  if(!lastLevel)return;
+  const pk=lastLevel.peak||0;const db=pk>0?Math.round(20*Math.log10(pk)):-99;
+  levelFrames++;if(pk<1e-5)zeroFrames++;
+  const bad=zeroFrames>3&&zeroFrames===levelFrames;
+  $('voiceStatus').textContent='正在录音 '+((recBytes/2/TARGET_RATE).toFixed(1))+'s · 电平 '+db+'dB'+(bad?' · ⚠ 全是静音，麦克风没采到声音！':'');
+}
+function framesToWav(frames,sampleRate){
+  let total=0;frames.forEach(f=>{total+=f.length});
+  const pcm=new Int16Array(total);let off=0;frames.forEach(f=>{pcm.set(f,off);off+=f.length});
+  const buf=new ArrayBuffer(44+pcm.byteLength);const v=new DataView(buf);
+  const wstr=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i))};
+  wstr(0,'RIFF');v.setUint32(4,36+pcm.byteLength,true);wstr(8,'WAVE');wstr(12,'fmt ');
+  v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
+  v.setUint32(24,sampleRate,true);v.setUint32(28,sampleRate*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);
+  wstr(36,'data');v.setUint32(40,pcm.byteLength,true);
+  new Int16Array(buf,44).set(pcm);
+  return new Blob([buf],{type:'audio/wav'});
+}
+function stopRec(){
+  if(!recording)return;
+  recording=false;listening=false;
+  $('micBtn').textContent='🎙️ 开始说';$('micBtn').title='开始语音输入';$('sendBtn').disabled=false;
+  if(recBytes===0){setRobotState('idle');$('voiceStatus').textContent='没采到音频（权限或静音？），请重试';return}
+  const allZero=levelFrames>3&&zeroFrames===levelFrames;
+  if(allZero){setRobotState('idle');$('voiceStatus').textContent='⚠ 这段录音全是静音，麦克风没采到声音';return}
+  setRobotState('thinking','正在识别你说的话…');
+  $('voiceStatus').textContent='正在识别…';
+  // ★先 flush 再收：worklet 每攒够 ~200ms 才发一帧，停止时里面还留着尾巴；
+  // 不 flush 等于每句话结尾都被削掉一点（demo 实测教训）。
+  try{workletNode&&workletNode.port.postMessage('flush')}catch(e){}
+  setTimeout(async()=>{
+    setRobotState('idle');
+    try{
+      const form=new FormData();form.append('audio',framesToWav(recFrames,TARGET_RATE),'speech.wav');
+      const r=await fetch('/api/stt',{method:'POST',body:form});
+      const d=await r.json();
+      if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:'识别失败');
+      if(d.silent||!d.text){$('voiceStatus').textContent='没有听到内容，请再试一次';return}
+      voiceFinal=d.text;$('chatInput').value=d.text;$('voiceRetake').hidden=false;
+      $('voiceStatus').textContent='识别完成（'+(d.stt_ms/1000).toFixed(1)+' 秒），可修改文字后点击“发送”，或点击“重录”';
+    }catch(e){
+      if(recognition){micMode='webspeech';$('voiceStatus').textContent=e.message+'（已切回浏览器识别，请重试）'}
+      else $('voiceStatus').textContent=e.message;
+    }
+  },FLUSH_WAIT_MS);
+}
+const workletCapable=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.AudioContext&&window.AudioWorkletNode);
+if('webkitSpeechRecognition' in window||'SpeechRecognition' in window){
+  const R=window.SpeechRecognition||window.webkitSpeechRecognition; recognition=new R(); recognition.lang='zh-CN'; recognition.interimResults=true; recognition.continuous=true; recognition.maxAlternatives=1;
+  recognition.onstart=()=>{listening=true;manualStop=false;setRobotState('listening');$('micBtn').textContent='⏹ 停止听';$('micBtn').title='停止录音并确认文字';$('voiceRetake').hidden=false;$('voiceStatus').textContent='正在听，文字会实时显示；普通话夹杂口音可以继续说…';$('sendBtn').disabled=true};
+  recognition.onresult=e=>{let interim='';for(let i=e.resultIndex;i<e.results.length;i++){const text=e.results[i][0].transcript;if(e.results[i].isFinal)voiceFinal+=text;else interim+=text}$('chatInput').value=voiceFinal+interim;$('voiceStatus').textContent=interim?'正在识别：'+interim:'已识别：'+voiceFinal};
+  recognition.onerror=e=>{listening=false;if(robotState==='listening')setRobotState('idle');$('sendBtn').disabled=false;const msg={'not-allowed':'麦克风权限被拒绝，请在浏览器地址栏允许麦克风。','no-speech':'没有听到声音，可以重试。','audio-capture':'没有找到可用麦克风。'}[e.error]||('语音识别失败：'+e.error);$('voiceStatus').textContent=msg;$('micBtn').textContent='🎙️ 开始说'};
+  recognition.onend=()=>{listening=false;if(robotState==='listening')setRobotState('idle');$('sendBtn').disabled=false;$('micBtn').textContent='🎙️ 开始说';$('micBtn').title='开始语音输入';if(voiceFinal||$('chatInput').value.trim())$('voiceStatus').textContent='识别完成，可修改文字后点击“发送”；也可以点击“重录”';else $('voiceStatus').textContent='没有识别到内容，请再试一次'};
+}
+micMode=workletCapable?'worklet':(recognition?'webspeech':null);
+if(micMode===null){$('micBtn').disabled=true;$('voiceStatus').textContent='当前浏览器不支持录音，请使用文字输入'}
+else if(micMode==='webspeech'){$('voiceStatus').textContent='使用浏览器实时识别：点击“开始说”后，文字会实时出现在输入框；停止后可修改，再点击发送。'}
+else{$('voiceStatus').textContent='点击“开始说”录音，点击“停止听”后识别文字出现在输入框，可修改后发送。连续对话会记住本次会话。'}
+$('micBtn').onclick=()=>{
+  if(busy)return;
+  if(micMode==='worklet'){if(recording)stopRec();else startRec();return}
+  if(listening)stopListening();
+  else{try{voiceFinal='';$('chatInput').value='';recognition.start()}catch(e){$('voiceStatus').textContent='麦克风正在启动，请稍候'}}
+};
+$('voiceRetake').onclick=()=>{stopListening();resetVoiceInput();if(micMode==='worklet')startRec();else{try{recognition.start()}catch(e){$('voiceStatus').textContent='请稍候再点击开始说'}}};
+</script></body></html>

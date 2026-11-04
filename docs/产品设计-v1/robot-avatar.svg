@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 440 440" role="img" aria-labelledby="title desc">
+  <title id="title">家庭机器人形象概念</title>
+  <desc id="desc">温暖的白色圆角机器人，有两只青绿色眼睛和柔和的微笑</desc>
+  <defs>
+    <radialGradient id="halo"><stop offset="0" stop-color="#fff8e9"/><stop offset=".64" stop-color="#e7f4ef"/><stop offset="1" stop-color="#f4f7f1"/></radialGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fffefa"/><stop offset="1" stop-color="#e9efea"/></linearGradient>
+    <linearGradient id="face" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#174747"/><stop offset="1" stop-color="#0e3435"/></linearGradient>
+    <filter id="shadow" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#285850" flood-opacity=".19"/></filter>
+  </defs>
+  <circle cx="220" cy="220" r="202" fill="url(#halo)"/>
+  <ellipse cx="220" cy="373" rx="132" ry="20" fill="#88ada3" opacity=".18"/>
+  <path d="M220 79v-20" stroke="#769d93" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="220" cy="53" r="13" fill="#f0ae83" stroke="#fff" stroke-width="6"/>
+  <rect x="75" y="98" width="290" height="240" rx="103" fill="url(#body)" stroke="#d5e2db" stroke-width="4" filter="url(#shadow)"/>
+  <rect x="91" y="139" width="258" height="155" rx="72" fill="url(#face)"/>
+  <ellipse cx="162" cy="207" rx="13" ry="22" fill="#a9f2db"/>
+  <ellipse cx="278" cy="207" rx="13" ry="22" fill="#a9f2db"/>
+  <path d="M197 248q23 17 46 0" fill="none" stroke="#a9f2db" stroke-width="7" stroke-linecap="round"/>
+  <ellipse cx="114" cy="274" rx="16" ry="8" fill="#f0ae83" opacity=".54"/>
+  <ellipse cx="326" cy="274" rx="16" ry="8" fill="#f0ae83" opacity=".54"/>
+  <circle cx="220" cy="317" r="6" fill="#a2c9b7"/>
+</svg>

@@ -45,6 +45,12 @@ def init_db() -> None:
                 payload TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS conversation_memories (
+                session_id TEXT PRIMARY KEY,
+                summary TEXT NOT NULL DEFAULT '',
+                messages TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL
+            );
             """
         )
 
@@ -71,3 +77,28 @@ def list_events(limit: int = 30) -> list[dict]:
         {"id": row["id"], "type": row["event_type"], "payload": json.loads(row["payload"]), "created_at": row["created_at"]}
         for row in rows
     ]
+
+
+def get_conversation_memory(session_id: str) -> dict:
+    init_db()
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT summary,messages FROM conversation_memories WHERE session_id=?", (session_id,)
+        ).fetchone()
+    return {"summary": row["summary"], "messages": json.loads(row["messages"])} if row else {"summary": "", "messages": []}
+
+
+def save_conversation_memory(session_id: str, summary: str, messages: list[dict]) -> None:
+    init_db()
+    with connection() as conn:
+        conn.execute(
+            "INSERT INTO conversation_memories(session_id,summary,messages,updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(session_id) DO UPDATE SET summary=excluded.summary,messages=excluded.messages,updated_at=excluded.updated_at",
+            (session_id, summary, json.dumps(messages, ensure_ascii=False), now_iso()),
+        )
+
+
+def delete_conversation_memory(session_id: str) -> None:
+    init_db()
+    with connection() as conn:
+        conn.execute("DELETE FROM conversation_memories WHERE session_id=?", (session_id,))

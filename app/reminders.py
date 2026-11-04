@@ -25,7 +25,7 @@ def get(reminder_id: int) -> dict | None:
 def list_active() -> list[dict]:
     with connection() as conn:
         rows = conn.execute(
-            "SELECT r.*, p.name AS person_name FROM reminders r LEFT JOIN people p ON p.id=r.person_id WHERE r.status='active' ORDER BY due_at"
+            "SELECT r.*, p.name AS person_name FROM reminders r LEFT JOIN people p ON p.id=r.person_id WHERE r.status='active' ORDER BY julianday(r.due_at)"
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -36,17 +36,35 @@ def cancel(reminder_id: int) -> bool:
         return cur.rowcount > 0
 
 
+def update(reminder_id: int, text: str, due_at: datetime) -> dict | None:
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM reminders WHERE id=? AND status='active'", (reminder_id,)
+        ).fetchone()
+        if not row:
+            return None
+        cur = conn.execute(
+            "UPDATE reminders SET text=?,due_at=? WHERE id=? AND status='active'",
+            (text, due_at.isoformat(), reminder_id),
+        )
+        if cur.rowcount == 0:
+            return None
+    return get(reminder_id)
+
+
 def due_now(now: datetime | None = None) -> list[dict]:
-    """Return due reminders and mark one-shot reminders as delivered."""
+    """Read due reminders; delivery is acknowledged only after successful playback."""
     current = (now or datetime.now().astimezone()).isoformat()
     with connection() as conn:
         rows = conn.execute(
             "SELECT r.*, p.name AS person_name FROM reminders r LEFT JOIN people p ON p.id=r.person_id "
-            "WHERE r.status='active' AND r.due_at <= ? ORDER BY r.due_at",
+            "WHERE r.status='active' AND julianday(r.due_at) <= julianday(?) ORDER BY julianday(r.due_at)",
             (current,),
         ).fetchall()
         due = [dict(row) for row in rows]
-        for row in rows:
-            if row["repeat_rule"] == "once":
-                conn.execute("UPDATE reminders SET status='delivered' WHERE id=?", (row["id"],))
         return due
+
+
+def mark_delivered(reminder_id: int) -> None:
+    with connection() as conn:
+        conn.execute("UPDATE reminders SET status='delivered' WHERE id=? AND status='active'", (reminder_id,))

@@ -1,124 +1,284 @@
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 from contextlib import asynccontextmanager
 import asyncio
+import io
+import json
+import time
+import threading
+import tempfile
+import wave
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Query
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field, field_validator
 
-from .db import init_db, list_events, record_event
+from .db import init_db, list_events, record_event, get_conversation_memory, save_conversation_memory, delete_conversation_memory
 from .commands import parse_reminder
 from .face import FaceService
-from .reminders import cancel, create, due_now, list_active
+from .reminders import cancel, create, due_now, list_active, mark_delivered, update
 from .voice import VoiceService
 from .llm import LLMService
 from .config import settings
+from .harness import agent
+from . import agent_store, bailian, identity
 
 faces = FaceService()
 voice = VoiceService()
 llm = LLMService()
+conversation_histories: dict[str, dict[str, object]] = {}
+conversation_lock = threading.Lock()
+RECENT_CONVERSATION_MESSAGES = 8
+MAX_CONVERSATION_MESSAGES = 20
 
 
 async def reminder_loop():
     while True:
         try:
-            for reminder in due_now():
+            reminders = due_now()
+        except Exception:
+            reminders = []
+        for reminder in reminders:
+            try:
                 person = f"{reminder['person_name']}，" if reminder.get("person_name") else ""
                 spoken = f"{person}提醒时间到了：{reminder['text']}"
-                result = voice.speak(spoken)
+                result = await asyncio.to_thread(voice.speak, spoken)
+                if result != "spoken":
+                    raise RuntimeError("提醒未播放，保留待提醒状态。")
+                mark_delivered(reminder["id"])
                 record_event("reminder_delivered", {"reminder_id": reminder["id"], "text": spoken, "voice": result})
-        except Exception as exc:
-            # A broken audio driver must not stop the reminder scheduler.
-            record_event("reminder_error", {"error": str(exc)})
+            except Exception:
+                record_event("reminder_error", {"reminder_id": reminder["id"], "error": "播放失败，将重试。"})
         await asyncio.sleep(15)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
+    agent_store.init_agent_db()
+    await asyncio.to_thread(voice.warmup)
     task = asyncio.create_task(reminder_loop())
     try:
         yield
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        await agent.shutdown()
 
 
-app = FastAPI(title="家庭机器人", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="家庭机器人", version="0.4.0", lifespan=lifespan)
 
 
 class ReminderIn(BaseModel):
-    text: str
+    text: str = Field(min_length=1, max_length=300)
     due_at: datetime
     person_id: int | None = None
-    repeat_rule: str = "once"
+    repeat_rule: Literal["once"] = "once"
+    scope: Literal["personal", "household"] | None = None
+
+    @field_validator('due_at')
+    @classmethod
+    def timezone_required(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError('提醒时间必须带时区')
+        return value
+
+    @field_validator("text")
+    @classmethod
+    def nonblank_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("提醒内容不能为空")
+        return value
 
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    return """<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>家庭机器人</title><style>
-:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#172033;background:#f5f7fb}*{box-sizing:border-box}body{max-width:1100px;margin:0 auto;padding:28px 18px}h1{margin:0;font-size:30px}.sub{color:#697386;margin:8px 0 24px}.grid{display:grid;grid-template-columns:1.2fr .8fr;gap:18px}.card{background:white;border:1px solid #e6eaf1;border-radius:18px;padding:20px;box-shadow:0 5px 18px #1b2d4b0a}h2{font-size:18px;margin:0 0 14px}.chat{min-height:280px;display:flex;flex-direction:column}.messages{flex:1;min-height:160px;overflow:auto;background:#f8fafc;border-radius:12px;padding:12px}.msg{padding:9px 12px;border-radius:12px;margin:7px 0;max-width:85%;white-space:pre-wrap}.user{background:#dcecff;margin-left:auto}.bot{background:#eaf7ed}.row{display:flex;gap:8px;margin-top:10px}input,button,textarea{font:inherit;border-radius:10px;border:1px solid #d5dbe6;padding:10px}input,textarea{width:100%}button{background:#2764e8;color:white;border:0;cursor:pointer}button.secondary{background:#eef2f8;color:#26344d}.small{font-size:13px;color:#697386}.reminder{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #edf0f5}.camera{width:100%;border-radius:12px;background:#131a27;aspect-ratio:4/3;object-fit:cover}.status{padding:8px 10px;border-radius:9px;background:#f0f4fa;color:#4e5c70;margin-top:10px}.ok{color:#16834b}.warn{color:#a45b00}@media(max-width:800px){.grid{grid-template-columns:1fr}}
-</style></head><body><h1>家庭机器人</h1><div class="sub">先让它在电脑上听懂、看见、记住和提醒，再迁移到树莓派。</div>
-<div class="grid"><section class="card chat"><h2>和机器人说话</h2><div id="messages" class="messages"><div class="msg bot">你好，我可以和你聊天，也可以帮你设置提醒。</div></div><div class="row"><input id="chatInput" placeholder="例如：提醒我明天晚上八点练琴" autocomplete="off"><button id="micBtn" class="secondary" title="使用浏览器麦克风">🎙️</button><button id="sendBtn">发送</button></div><div id="voiceStatus" class="small">支持 Chrome/Safari 的浏览器语音识别；也可以直接输入文字。</div></section>
-<section class="card"><h2>提醒</h2><form id="reminderForm"><div class="row"><input id="reminderText" placeholder="提醒内容" required><input id="due" type="datetime-local" required></div><button style="margin-top:10px">创建提醒</button></form><div id="reminders" class="small" style="margin-top:14px">加载中…</div></section>
-<section class="card"><h2>摄像头与家庭成员</h2><video id="camera" class="camera" autoplay muted playsinline></video><canvas id="snapshot" hidden></canvas><div class="row"><button id="startCamera" class="secondary">打开摄像头</button><button id="recognize">识别我</button></div><div class="row"><input id="personName" placeholder="姓名（注册时填写）"><button id="enroll" class="secondary">拍照注册</button></div><div id="visionStatus" class="status">摄像头尚未打开</div></section>
-<section class="card"><h2>最近发生的事</h2><div id="events" class="small">加载中…</div><div id="systemStatus" class="status">检查服务中…</div></section></div>
-<script>
-const $=id=>document.getElementById(id); const messages=$('messages');
-function addMsg(text,who='bot'){const d=document.createElement('div');d.className='msg '+who;d.textContent=text;messages.appendChild(d);messages.scrollTop=messages.scrollHeight}
-function say(text){if('speechSynthesis' in window){speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);u.lang='zh-CN';speechSynthesis.speak(u)}}
-async function send(){const text=$('chatInput').value.trim();if(!text)return;addMsg(text,'user');$('chatInput').value='';try{const r=await fetch('/api/command?text='+encodeURIComponent(text),{method:'POST'});const data=await r.json();if(!r.ok)throw Error(data.detail||'请求失败');if(data.needs_confirmation){addMsg(data.message);say(data.message);const b=document.createElement('button');b.textContent='确认创建提醒';b.onclick=async()=>{const x=await fetch('/api/reminders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:data.text,due_at:data.due_at})});if(x.ok){addMsg('好的，提醒已经记下了。');say('好的，提醒已经记下了。');b.remove();loadReminders()}};messages.appendChild(b)}else{addMsg(data.reply||'我暂时没有听懂。');say(data.reply||'我暂时没有听懂。')} }catch(e){addMsg('暂时出错：'+e.message)}}
-$('sendBtn').onclick=send;$('chatInput').onkeydown=e=>{if(e.key==='Enter')send()};
-async function loadReminders(){const r=await fetch('/api/reminders');const a=await r.json();$('reminders').innerHTML=a.length?a.map(x=>`<div class="reminder"><span>${new Date(x.due_at).toLocaleString()}<br>${x.text}</span><button class="secondary" onclick="cancelReminder(${x.id})">取消</button></div>`).join(''):'暂无待提醒事项'}
-async function cancelReminder(id){await fetch('/api/reminders/'+id,{method:'DELETE'});loadReminders()}
-$('reminderForm').onsubmit=async e=>{e.preventDefault();const r=await fetch('/api/reminders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:$('reminderText').value,due_at:new Date($('due').value).toISOString()})});if(r.ok){$('reminderText').value='';loadReminders();addMsg('提醒已经创建。');}}
-let stream;async function openCamera(){try{stream=await navigator.mediaDevices.getUserMedia({video:true});$('camera').srcObject=stream;$('visionStatus').textContent='摄像头已打开，可以识别或注册';$('visionStatus').className='status ok'}catch(e){$('visionStatus').textContent='无法打开摄像头：'+e.message;$('visionStatus').className='status warn'}}$('startCamera').onclick=openCamera;
-async function photo(endpoint,extra={}){if(!stream)return alert('请先打开摄像头');const v=$('camera'),c=$('snapshot');c.width=v.videoWidth;c.height=v.videoHeight;c.getContext('2d').drawImage(v,0,0);const blob=await new Promise(ok=>c.toBlob(ok,'image/jpeg',.9));const f=new FormData();f.append('image',blob,'camera.jpg');Object.entries(extra).forEach(([k,v])=>f.append(k,v));const r=await fetch(endpoint,{method:'POST',body:f});const data=await r.json();if(!r.ok)throw Error(data.detail||'视觉处理失败');return data}
-$('recognize').onclick=async()=>{try{const d=await photo('/api/faces/recognize');const names=d.faces.map(x=>x.name).join('、')||'没有检测到人脸';$('visionStatus').textContent='识别结果：'+names;$('visionStatus').className='status ok';say(names==='没有检测到人脸'?names:'你好，'+names)}catch(e){$('visionStatus').textContent=e.message;$('visionStatus').className='status warn'}};
-$('enroll').onclick=async()=>{const name=$('personName').value.trim();if(!name)return alert('请先填写姓名');try{const d=await photo('/api/faces/enroll',{name});$('visionStatus').textContent='已注册：'+d.name;$('visionStatus').className='status ok'}catch(e){$('visionStatus').textContent=e.message;$('visionStatus').className='status warn'}};
-async function loadEvents(){const a=await (await fetch('/api/events')).json();$('events').innerHTML=a.length?a.slice(0,8).map(x=>`<div class="reminder"><span>${new Date(x.created_at).toLocaleTimeString()} ${x.payload.text||x.type}</span></div>`).join(''):'暂无事件'}
-async function health(){const d=await (await fetch('/api/health')).json();$('systemStatus').innerHTML='<span class="ok">● 服务正常</span>　模型：'+(d.llm_enabled?'已连接':'未配置')}
-async function refresh(){loadReminders();loadEvents();health()}refresh();setInterval(refresh,10000);
-let recognition; if('webkitSpeechRecognition' in window||'SpeechRecognition' in window){const R=window.SpeechRecognition||window.webkitSpeechRecognition;recognition=new R();recognition.lang='zh-CN';recognition.interimResults=false;recognition.onstart=()=>{$('voiceStatus').textContent='正在听…';};recognition.onresult=e=>{$('chatInput').value=e.results[0][0].transcript;send()};recognition.onerror=e=>{$('voiceStatus').textContent='语音识别失败：'+e.error};recognition.onend=()=>{$('voiceStatus').textContent='可以继续说话或输入文字'};$('micBtn').onclick=()=>recognition.start()}else{$('micBtn').disabled=true;$('voiceStatus').textContent='当前浏览器不支持语音识别，请使用文字输入'}
-</script></body></html>"""
+    return (Path(__file__).with_name("web.html")).read_text()
+
+
+@app.get("/static/robot-avatar.svg")
+def robot_avatar():
+    return FileResponse(Path(__file__).parent.parent / "docs" / "产品设计-v1" / "robot-avatar.svg", media_type="image/svg+xml")
+
+
+@app.get("/static/worklet.js")
+def worklet_js():
+    # 麦克风 AudioWorklet：采集 → 重采样 16k Int16 → 电平上报（移植自 voice-poc demo）
+    return Response((Path(__file__).with_name("worklet.js")).read_text(),
+                    media_type="application/javascript")
 
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "service": "family-robot", "version": app.version, "llm_enabled": llm.enabled, "llm_blocked": llm.blocked_reason, "voice": voice.status()}
+    backend = agent if settings.agent_backend == 'harness' else llm
+    return {"ok": True, "service": "family-robot", "version": app.version, "agent_backend": settings.agent_backend, "llm_enabled": backend.enabled, "llm_blocked": backend.blocked_reason, "voice": voice.status(), "voice_details": voice.details(), "stt": settings.stt_backend, "llm_model": settings.llm_model, "llm_status": backend.last_status}
+
+
+class VoicePreferenceIn(BaseModel):
+    voice: str = Field(min_length=1, max_length=32)
+
+
+@app.get("/api/voice/settings")
+def voice_settings():
+    return voice.details()
+
+
+@app.put("/api/voice/settings")
+def update_voice_settings(payload: VoicePreferenceIn):
+    try:
+        voice.set_voice(payload.voice)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return voice.details()
 
 
 @app.get("/api/reminders")
-def reminders():
-    return list_active()
+def reminders(session_id: str | None = None):
+    if session_id is None:
+        return list_active()
+    member = identity.current(session_id)['person']
+    return identity.visible_reminders(member['id'] if member else None)
 
 
 @app.get("/api/events")
-def events():
-    return list_events()
+def events(session_id: str | None = None):
+    if session_id is None:
+        return list_events()
+    member = identity.current(session_id)['person']
+    result = []
+    for event in list_events():
+        rid = event['payload'].get('reminder_id')
+        if rid:
+            try:
+                identity.require_reminder(rid, member['id'] if member else None)
+                result.append(event)
+            except ValueError:
+                pass
+    return result
 
 
 @app.post("/api/reminders")
-def add_reminder(payload: ReminderIn):
+def add_reminder(payload: ReminderIn, session_id: str | None = None, identity_revision: int | None = None):
+    if session_id is not None:
+        state = check_identity(session_id, identity_revision)
+        member = state['person']
+        payload.person_id = member['id'] if member and payload.scope != 'household' else None
+        if payload.scope == 'personal' and member is None:
+            raise HTTPException(409, '请先选择家庭成员')
+    if payload.person_id is not None and not identity.person(payload.person_id):
+        raise HTTPException(422, '家庭成员不存在')
+    if payload.due_at <= datetime.now().astimezone():
+        raise HTTPException(422, "提醒时间需要设为未来时间。")
     return create(payload.text, payload.due_at, payload.person_id, payload.repeat_rule)
 
 
+@app.patch("/api/reminders/{reminder_id}")
+def edit_reminder(reminder_id: int, payload: ReminderIn, session_id: str | None = None, identity_revision: int | None = None):
+    if session_id is not None:
+        check_reminder_owner(reminder_id, session_id, identity_revision)
+    if payload.due_at <= datetime.now().astimezone():
+        raise HTTPException(422, "提醒时间需要设为未来时间。")
+    item = update(reminder_id, payload.text, payload.due_at)
+    if not item:
+        raise HTTPException(404, "提醒不存在或已经送达/取消。")
+    return item
+
+
 @app.delete("/api/reminders/{reminder_id}")
-def delete_reminder(reminder_id: int):
+def delete_reminder(reminder_id: int, session_id: str | None = None, identity_revision: int | None = None):
+    if session_id is not None:
+        check_reminder_owner(reminder_id, session_id, identity_revision)
     if not cancel(reminder_id):
         raise HTTPException(404, "提醒不存在或已取消")
     return {"ok": True}
 
 
-@app.post("/api/faces/enroll")
-async def enroll_face(name: str = Form(...), image: UploadFile = File(...)):
-    path = Path("/tmp") / f"robot-enroll-{image.filename}"
-    path.write_bytes(await image.read())
+def check_identity(session_id, revision=None):
     try:
-        return faces.enroll(name, str(path))
+        return identity.check(session_id, revision)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+def check_reminder_owner(reminder_id, session_id, revision=None):
+    state = check_identity(session_id, revision)
+    try:
+        return identity.require_reminder(reminder_id, state['person']['id'] if state['person'] else None)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+class SpeakerIn(BaseModel):
+    person_id: int | None = Field(default=None, ge=1)
+    revision: int = Field(ge=0)
+
+
+@app.get('/api/people')
+def list_people():
+    return identity.people()
+
+
+@app.delete('/api/people/{person_id}')
+async def delete_person(person_id: int):
+    # 与人脸识别同样的保护：正在回答时删除会让进行中的一轮失去归属
+    lock = agent.locks.get('person:' + str(person_id))
+    if lock is not None and lock.locked():
+        raise HTTPException(409, '该成员正在对话中，请先结束当前回答再删除。')
+    try:
+        harness_id = identity.delete_person(person_id)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if harness_id:
+        await agent.drop_session(harness_id)
+    record_event('person_deleted', {'person_id': person_id})
+    return {'deleted': person_id}
+
+
+@app.get('/api/conversations/{session_id}/identity')
+def current_speaker(session_id: str):
+    return identity.public(session_id)
+
+
+def select_speaker(session_id, person_id, revision, source='manual'):
+    if agent.lock(session_id).locked():
+        raise HTTPException(409, '请先结束当前回答或识别，再切换成员')
+    if person_id is not None:
+        target_lock = agent.locks.get('person:' + str(person_id))
+        if target_lock and target_lock.locked():
+            raise HTTPException(409, '该成员的对话正在处理中，请稍后再切换')
+    try:
+        return identity.select(session_id, person_id, source, revision)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.put('/api/conversations/{session_id}/identity')
+async def change_speaker(session_id: str, payload: SpeakerIn):
+    return select_speaker(session_id, payload.person_id, payload.revision)
+
+
+async def face_image(image):
+    content = await image.read(10 * 1024 * 1024 + 1)
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(413, '照片不能超过10MB')
+    with tempfile.NamedTemporaryFile(prefix='robot-face-', suffix='.jpg', delete=False) as file:
+        file.write(content)
+        return Path(file.name)
+
+
+@app.post("/api/faces/enroll")
+async def enroll_face(name: str = Form(..., min_length=1, max_length=80), image: UploadFile = File(...)):
+    if not name.strip():
+        raise HTTPException(422, '请填写姓名')
+    path = await face_image(image)
+    try:
+        return await asyncio.to_thread(faces.enroll, name.strip(), str(path))
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
     finally:
@@ -126,13 +286,26 @@ async def enroll_face(name: str = Form(...), image: UploadFile = File(...)):
 
 
 @app.post("/api/faces/recognize")
-async def recognize_face(image: UploadFile = File(...)):
-    path = Path("/tmp") / f"robot-recognize-{image.filename}"
-    path.write_bytes(await image.read())
+async def recognize_face(image: UploadFile = File(...), session_id: str | None = Form(None), identity_revision: int | None = Form(None)):
+    if session_id:
+        check_identity(session_id, identity_revision)
+        if agent.lock(session_id).locked():
+            raise HTTPException(409, '请先结束当前回答，再识别成员')
+    path = await face_image(image)
     try:
-        return faces.recognize(str(path))
-    except RuntimeError as exc:
-        raise HTTPException(501, str(exc)) from exc
+        # Recognition is read-only until it has finished; revision detects any intervening switch.
+        before = check_identity(session_id, identity_revision)['revision'] if session_id else None
+        result = await asyncio.to_thread(faces.recognize, str(path))
+        if session_id:
+            found = result['faces']
+            person_id = found[0].get('person_id') if len(found) == 1 else None
+            result['identity'] = select_speaker(session_id, person_id, before, 'face')
+            result['needs_selection'] = person_id is None
+            result['message'] = ('认出你了，' + result['identity']['person']['name'] + '。现在可以继续聊天。') if person_id else (
+                '画面中有多人，请选择当前说话人。' if len(found) > 1 else '还不能确认你是谁，请选择成员或继续访客聊天。')
+        return result
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
     finally:
         path.unlink(missing_ok=True)
 
@@ -154,9 +327,54 @@ async def transcribe(audio: UploadFile = File(...)):
         path.unlink(missing_ok=True)
 
 
+@app.post("/api/stt")
+async def stt(audio: UploadFile = File(...)):
+    """浏览器 AudioWorklet 录音（16bit 单声道 WAV）→ qwen3-asr-flash 整句识别。
+
+    静默门控必须在送识别之前做：LLM 架构的 ASR 喂全零静音不会返回空，
+    而是幻觉出文本（demo 2026-11-03 实测）。
+    """
+    if settings.stt_backend != 'dashscope':
+        raise HTTPException(501, '服务端语音识别未启用，请改用浏览器语音识别。')
+    data = await audio.read()
+    if len(data) > 12 * 1024 * 1024:
+        raise HTTPException(413, '录音过长，请分段后再试。')
+    try:
+        with wave.open(io.BytesIO(data)) as wav_file:
+            channels, width = wav_file.getnchannels(), wav_file.getsampwidth()
+            rate = wav_file.getframerate()
+            pcm = wav_file.readframes(wav_file.getnframes())
+    except Exception as exc:
+        raise HTTPException(422, '无法解析录音，请上传 WAV 音频。') from exc
+    if channels != 1 or width != 2:
+        raise HTTPException(422, '仅支持 16bit 单声道 WAV 录音。')
+    silent, stats = bailian.is_silence(pcm, rate)
+    if silent:
+        return {'text': '', 'silent': True, 'stt_ms': 0, 'stats': stats}
+    started = time.monotonic()
+    try:
+        text = await asyncio.to_thread(bailian.stt_transcribe, pcm, rate)
+    except bailian.BailianError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {'text': text, 'silent': False, 'stats': stats,
+            'stt_ms': round((time.monotonic() - started) * 1000)}
+
+
 @app.post("/api/command")
-def command(text: str):
-    parsed = parse_reminder(text)
+async def command(text: str = Query(min_length=1, max_length=2000), session_id: str = Query(default='default', min_length=1, max_length=100), identity_revision: int | None = None):
+    if settings.agent_backend == 'harness':
+        try:
+            return await agent.run(session_id, text, expected_revision=identity_revision) if identity_revision is not None else await agent.run(session_id, text)
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+    return await asyncio.to_thread(legacy_command, text)
+
+
+def legacy_command(text: str):
+    try:
+        parsed = parse_reminder(text)
+    except ValueError as exc:
+        raise HTTPException(400, "时间格式不正确，请使用有效的小时和分钟。") from exc
     if parsed:
         reminder_text, due_at = parsed
         return {"needs_confirmation": True, "text": reminder_text, "due_at": due_at.isoformat(), "message": f"确认一下，{due_at:%m月%d日%H点%M分}提醒你{reminder_text}，可以吗？", "source": "local"}
@@ -175,7 +393,13 @@ def command(text: str):
 
 
 @app.post("/api/chat")
-def chat(text: str):
+async def chat(text: str = Query(min_length=1, max_length=2000), session_id: str = Query(default='default', min_length=1, max_length=100), identity_revision: int | None = None):
+    if settings.agent_backend == 'harness':
+        return await command(text, session_id, identity_revision)
+    return await asyncio.to_thread(legacy_chat, text)
+
+
+def legacy_chat(text: str):
     if not llm.enabled:
         raise HTTPException(503, "LLM 未配置")
     try:
@@ -184,3 +408,146 @@ def chat(text: str):
         raise HTTPException(503, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(502, f"模型调用失败：{exc}") from exc
+
+
+class SpeechIn(BaseModel):
+    text: str = Field(min_length=1, max_length=1500)
+
+
+@app.post("/api/voice/audio")
+def voice_audio(payload: SpeechIn):
+    try:
+        audio = voice.synthesize(payload.text)
+        return Response(audio, media_type="audio/wav", headers={"Cache-Control": "no-store", "X-Voice-Backend": voice.status()})
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(503, "语音暂时不可用，请检查中文语音配置。") from exc
+
+
+@app.post("/api/command/stream")
+async def stream_command(text: str = Query(min_length=1, max_length=2000), session_id: str = Query(default="default", min_length=1, max_length=100), identity_revision: int | None = None):
+    if settings.agent_backend == 'harness':
+        async def stream():
+            async for event in agent.stream(session_id, text, expected_revision=identity_revision):
+                yield 'data: ' + json.dumps(event, ensure_ascii=False) + '\n\n'
+        return StreamingResponse(stream(), media_type='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+    return legacy_stream_command(text, session_id)
+
+
+def legacy_stream_command(text, session_id):
+    try:
+        parsed = parse_reminder(text)
+    except ValueError as exc:
+        raise HTTPException(400, "时间格式不正确，请使用有效的小时和分钟。") from exc
+
+    def emit(data):
+        return "data: " + json.dumps(data, ensure_ascii=False) + "\n\n"
+
+    def events():
+        started = time.monotonic()
+        yield emit({"type": "start"})
+        if parsed:
+            reminder_text, due_at = parsed
+            yield emit({"type": "result", "needs_confirmation": True,
+                        "text": reminder_text, "due_at": due_at.isoformat(),
+                        "message": f"确认一下，{due_at:%m月%d日%H点%M分}提醒你{reminder_text}，可以吗？", "source": "local"})
+        else:
+            try:
+                with conversation_lock:
+                    memory = conversation_histories.get(session_id)
+                if memory is None:
+                    memory = get_conversation_memory(session_id)
+                    with conversation_lock:
+                        conversation_histories[session_id] = memory
+                summary = str(memory["summary"])
+                history = list(memory["messages"])
+                if len(history) >= MAX_CONVERSATION_MESSAGES:
+                    compact_count = len(history) - RECENT_CONVERSATION_MESSAGES
+                    compact = history[:compact_count]
+                    try:
+                        summary = llm.summarize(summary, compact)
+                    except RuntimeError as exc:
+                        yield emit({"type": "error", "message": str(exc)})
+                        return
+                    history = history[compact_count:]
+                    with conversation_lock:
+                        conversation_histories[session_id] = {"summary": summary, "messages": list(history)}
+                    save_conversation_memory(session_id, summary, history)
+                messages = ([{"role": "system", "content": "此前较早对话的记忆摘要（作为背景事实使用；若用户后来更正，以最新说法为准）：" + summary}] if summary else []) + history + [{"role": "user", "content": text}]
+                answer_parts = []
+                for delta in llm.stream_messages(messages):
+                    answer_parts.append(delta)
+                    yield emit({"type": "delta", "text": delta})
+                answer = "".join(answer_parts).strip()
+                if answer:
+                    with conversation_lock:
+                        memory = conversation_histories.setdefault(session_id, {"summary": summary, "messages": []})
+                        updated = memory["messages"]
+                        updated.extend([{"role": "user", "content": text}, {"role": "assistant", "content": answer}])
+                        saved_summary = str(memory["summary"])
+                    save_conversation_memory(session_id, saved_summary, updated)
+            except RuntimeError as exc:
+                yield emit({"type": "error", "message": str(exc)})
+                return
+        yield emit({"type": "done", "elapsed_ms": round((time.monotonic() - started) * 1000)})
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.delete("/api/conversations/{session_id}")
+async def clear_conversation(session_id: str, identity_revision: int | None = None):
+    check_identity(session_id, identity_revision)
+    if agent.lock(session_id).locked():
+        raise HTTPException(409, '请先取消当前回答，再开启新对话。')
+    async with agent.lock(session_id):
+        agent_store.clear(session_id)
+        with conversation_lock:
+            conversation_histories.pop(session_id, None)
+        delete_conversation_memory(session_id)
+    return {"ok": True}
+
+
+class DraftConfirmation(BaseModel):
+    session_id: str = Field(min_length=1, max_length=100)
+    revision: int = Field(ge=1)
+    identity_revision: int | None = None
+
+
+class DraftEdit(DraftConfirmation):
+    text: str = Field(min_length=1, max_length=300)
+    due_at: datetime
+
+
+@app.get('/api/conversations/{session_id}/drafts')
+def pending_drafts(session_id: str):
+    return agent_store.drafts(agent_store.session(session_id)['harness_id'])
+
+
+@app.post('/api/reminder-drafts/{draft_id}/confirm')
+async def confirm_draft(draft_id: str, payload: DraftConfirmation):
+    check_identity(payload.session_id, payload.identity_revision)
+    if agent.lock(payload.session_id).locked():
+        raise HTTPException(409, '对话正在处理，请稍后确认最新草稿。')
+    async with agent.lock(payload.session_id):
+        try:
+            sid = agent_store.session(payload.session_id)['harness_id']
+            return agent_store.confirm(sid, draft_id, payload.revision)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+
+@app.patch('/api/reminder-drafts/{draft_id}')
+async def edit_draft(draft_id: str, payload: DraftEdit):
+    speaker = check_identity(payload.session_id, payload.identity_revision)
+    if agent.lock(payload.session_id).locked():
+        raise HTTPException(409, '对话正在处理，请稍后修改。')
+    async with agent.lock(payload.session_id):
+        sid = agent_store.session(payload.session_id)['harness_id']
+        current = next((d for d in agent_store.drafts(sid) if d['id'] == draft_id), None)
+        if not current or current['revision'] != payload.revision:
+            raise HTTPException(409, '草稿已修改，请确认最新内容。')
+        try:
+            return agent_store.prepare(sid, {'draft_id': draft_id, 'text': payload.text, 'due_at': payload.due_at.isoformat()}, datetime.now().astimezone().isoformat(), speaker['person']['id'] if speaker['person'] else None)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
