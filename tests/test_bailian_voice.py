@@ -233,7 +233,7 @@ class VoiceServiceBailianTests(unittest.TestCase):
 class SttEndpointTests(unittest.TestCase):
     def setUp(self):
         init_db()
-        self.client = TestClient(app)
+        self.client = TestClient(app, headers={'X-Robot-Client': 'test'})
 
     def test_worklet_js_served(self):
         response = self.client.get('/static/worklet.js')

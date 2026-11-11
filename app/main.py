@@ -23,6 +23,7 @@ from .llm import LLMService
 from .config import settings
 from .harness import agent
 from . import agent_store, bailian, identity
+from .csrf import CSRFMiddleware
 
 faces = FaceService()
 voice = VoiceService()
@@ -68,6 +69,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="家庭机器人", version="0.4.0", lifespan=lifespan)
+app.add_middleware(CSRFMiddleware)
 
 
 class ReminderIn(BaseModel):
@@ -313,18 +315,6 @@ async def recognize_face(image: UploadFile = File(...), session_id: str | None =
 @app.post("/api/speak")
 def speak(text: str):
     return {"text": text, "status": voice.speak(text)}
-
-
-@app.post("/api/transcribe")
-async def transcribe(audio: UploadFile = File(...)):
-    path = Path("/tmp") / f"robot-audio-{audio.filename}"
-    path.write_bytes(await audio.read())
-    try:
-        return {"text": voice.transcribe(str(path))}
-    except RuntimeError as exc:
-        raise HTTPException(501, str(exc)) from exc
-    finally:
-        path.unlink(missing_ok=True)
 
 
 @app.post("/api/stt")

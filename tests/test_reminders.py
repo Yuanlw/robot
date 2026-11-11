@@ -23,10 +23,10 @@ class ReminderTests(unittest.TestCase):
 
     def test_reading_due_does_not_acknowledge_delivery(self):
         item=create('测试',datetime.fromisoformat('2020-01-01T00:00:00+08:00'))
-        self.assertEqual(due_now()[0]['id'],item['id'])
+        self.assertEqual(due_now(expiry_hours=None)[0]['id'],item['id'])
         self.assertEqual(get(item['id'])['status'],'active')
         mark_delivered(item['id'])
-        self.assertEqual(due_now(),[])
+        self.assertEqual(due_now(expiry_hours=None),[])
 
     def test_half_hour_is_time_not_reminder_content(self):
         text,due=parse_reminder('提醒我明天晚上八点半练琴')

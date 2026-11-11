@@ -37,6 +37,8 @@
 <dialog id="editReminderDialog"><form id="editReminderForm" method="dialog" class="card"><h2>修改提醒</h2><input type="hidden" id="editReminderId"><label class="field-label" for="editReminderText">提醒内容</label><input id="editReminderText" maxlength="300" required><label class="field-label" for="editReminderDue">提醒时间</label><input id="editReminderDue" type="datetime-local" required><div class="row"><button id="saveReminderEdit" type="button">保存修改</button><button class="secondary" value="cancel">返回</button></div><div id="editReminderStatus" class="small" role="status"></div></form></dialog>
 <script>
 const $=id=>document.getElementById(id); const messages=$('messages');
+// CSRF 防护：包装原生 fetch，自动给所有写请求加自定义头
+const originalFetch=window.fetch;window.fetch=function(url,options){options=options||{};if(!options.method||['POST','PUT','PATCH','DELETE'].includes(options.method.toUpperCase())){options.headers=options.headers||{};if(typeof options.headers.set==='function')options.headers.set('X-Robot-Client','web');else options.headers['X-Robot-Client']='web';}return originalFetch.call(this,url,options);};
 // 机器人五状态（产品方案 v1）：待命/倾听/思考/说话/提醒，共用同一形象，动画+文案变化。
 const avatar=$('avatar'),heroTitle=$('heroTitle'),heroHint=$('heroHint');
 const STATE_TEXT={idle:['我在这里','可以和我聊天，也可以说出要记住的事。'],listening:['正在听','对准麦克风说话，说完点击“停止听”。'],thinking:['正在整理回答','稍等一下…'],speaking:['正在说话','想打断就点“停止播放”。'],reminder:['有一件事要提醒你','到点的提醒刚刚播放过了。']};

@@ -52,15 +52,37 @@ def update(reminder_id: int, text: str, due_at: datetime) -> dict | None:
     return get(reminder_id)
 
 
-def due_now(now: datetime | None = None) -> list[dict]:
-    """Read due reminders; delivery is acknowledged only after successful playback."""
-    current = (now or datetime.now().astimezone()).isoformat()
+def due_now(now: datetime | None = None, expiry_hours: int | None = 24) -> list[dict]:
+    """Read due reminders; delivery is acknowledged only after successful playback.
+    
+    expiry_hours: 超过此小时数的过期提醒不再自动播放。None 则不限制过期时间。
+    安静时段：当日 8:00 前不播报，避免深夜/凌晨误扰。
+    """
+    current_dt = now or datetime.now().astimezone()
+    current = current_dt.isoformat()
+    # 安静时段：当日 8:00 前不播报
+    quiet_ok = current_dt.hour >= 8
+    
     with connection() as conn:
-        rows = conn.execute(
-            "SELECT r.*, p.name AS person_name FROM reminders r LEFT JOIN people p ON p.id=r.person_id "
-            "WHERE r.status='active' AND julianday(r.due_at) <= julianday(?) ORDER BY julianday(r.due_at)",
-            (current,),
-        ).fetchall()
+        if not quiet_ok:
+            return []
+        if expiry_hours is None:
+            rows = conn.execute(
+                "SELECT r.*, p.name AS person_name FROM reminders r LEFT JOIN people p ON p.id=r.person_id "
+                "WHERE r.status='active' AND julianday(r.due_at) <= julianday(?) "
+                "ORDER BY julianday(r.due_at)",
+                (current,),
+            ).fetchall()
+        else:
+            expiry_threshold = current_dt.timestamp() - expiry_hours * 3600
+            expiry_iso = datetime.fromtimestamp(expiry_threshold, tz=current_dt.tzinfo).isoformat()
+            rows = conn.execute(
+                "SELECT r.*, p.name AS person_name FROM reminders r LEFT JOIN people p ON p.id=r.person_id "
+                "WHERE r.status='active' AND julianday(r.due_at) <= julianday(?) "
+                "AND julianday(r.due_at) >= julianday(?) "
+                "ORDER BY julianday(r.due_at)",
+                (current, expiry_iso),
+            ).fetchall()
         due = [dict(row) for row in rows]
         return due
 

@@ -29,7 +29,7 @@ class ConversationTests(unittest.TestCase):
         init_db()
         from app.agent_store import init_agent_db
         init_agent_db()
-        self.client = TestClient(app)
+        self.client = TestClient(app, headers={'X-Robot-Client': 'test'})
 
     def test_local_reminder_does_not_call_model(self):
         with patch.object(llm, 'stream_chat', side_effect=AssertionError('local reminder must not call model')):

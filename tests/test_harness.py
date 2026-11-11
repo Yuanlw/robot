@@ -86,7 +86,7 @@ class AgentToolsTests(unittest.TestCase):
 
     def test_button_confirmation_is_idempotent_and_clear_rotates_session(self):
         row = self.draft()
-        client = TestClient(app)
+        client = TestClient(app, headers={'X-Robot-Client': 'test'})
         data = {'session_id': 'browser-a', 'revision': row['revision']}
         url = '/api/reminder-drafts/' + row['id'] + '/confirm'
         self.assertEqual(client.post(url, json=data).status_code, 200)
@@ -97,7 +97,7 @@ class AgentToolsTests(unittest.TestCase):
         self.assertEqual(client.post(url, json=data).status_code, 409)
 
     def test_all_chat_routes_use_harness_without_rule_interception(self):
-        client = TestClient(app)
+        client = TestClient(app, headers={'X-Robot-Client': 'test'})
         async def run(sid, text, on_event=lambda event: None):
             return {'reply': '收到：' + text, 'drafts': [], 'source': 'harness'}
         with patch.object(settings, 'agent_backend', 'harness'), patch.object(agent, 'run', side_effect=run) as mock:

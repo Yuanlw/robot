@@ -23,7 +23,7 @@ class IdentityTests(unittest.TestCase):
         db.init_db();agent_store.init_agent_db()
         self.a=FaceService()._save('小林',b'private-face-feature-A')
         self.b=FaceService()._save('小周',b'private-face-feature-B')
-        self.client=TestClient(app)
+        self.client=TestClient(app, headers={'X-Robot-Client': 'test'})
         self.now=datetime.now().astimezone()
 
     def select(self, member, browser='browser'):
