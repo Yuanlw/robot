@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     tts_model_dir: Path | None = None
     tts_bailian_model: str = "qwen3-tts-flash"
     tts_bailian_voice: str = "Cherry"
+    
+    # 学习陪伴模式（2026-11-11 新增，默认关闭）
+    study_enabled: bool = False
+    study_focus_minutes: int = 40
+    study_break_minutes: int = 5
+    study_max_reminders_per_hour: int = 6
 
     model_config = SettingsConfigDict(env_prefix="ROBOT_", env_file=".env")
 

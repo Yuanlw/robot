@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
-from . import agent_store, reminders, identity
+from . import agent_store, reminders, identity, study
 from .config import settings
 from .db import connection, init_db
 
@@ -33,6 +33,17 @@ TOOLS = [
     schema('list_reminders', '查询当前家庭待提醒事项和本会话待确认草稿，修改或取消已有提醒前先查询。'),
     schema('cancel_reminder', '取消用户明确指定的提醒或草稿。传 reminder_id 或 draft_id，二选一。', {
         'reminder_id': {'type': 'integer'}, 'draft_id': {'type': 'string'}}),
+    schema('study_extend', '延长当前学习或休息阶段。当用户说"再给我N分钟"时调用。', {
+        'minutes': {'type': 'integer', 'description': '延长分钟数，默认5'}}, []),
+    schema('study_pause', '暂停学习进入休息。'),
+    schema('study_resume', '从休息恢复学习。'),
+    schema('study_end', '结束本次学习会话，播报总时长。'),
+    schema('study_review', '查看学习报告，回答"最近学得怎么样"类问题。', {
+        'period': {'type': 'string', 'enum': ['today', 'week', 'month'], 'description': '默认week'}}, []),
+    schema('study_suggest', '根据历史数据给出学习节奏建议（最佳时长、高效时段）。'),
+    schema('study_rate', '用户自评本次学习质量时调用，如"今天学得不错"。', {
+        'score': {'type': 'integer', 'minimum': 1, 'maximum': 10, 'description': '10为最佳'},
+        'tags': {'type': 'array', 'items': {'type': 'string'}, 'description': '场景标签，如["晚上","有点吵"]'}}, ['score']),
 ]
 
 
@@ -100,12 +111,76 @@ def execute(name, args, context):
         if not reminders.cancel(args['reminder_id']):
             raise ValueError('提醒不存在或已经送达/取消')
         return {'cancelled': True, 'reminder_id': args['reminder_id']}
+    
+    # 学习陪伴工具
+    if not settings.study_enabled:
+        raise ValueError('学习陪伴功能未启用')
+    person_id = context.get('person_id')
+    if not person_id:
+        raise ValueError('需要先选择身份')
+    
+    if name == 'study_extend':
+        session = study.get_active_session(person_id)
+        if not session:
+            raise ValueError('当前没有活动的学习会话')
+        minutes = args.get('minutes', 5)
+        study.record_reminder(session['id'], 'extend', str(minutes))
+        return {'ok': True, 'message': f'好的，再给你 {minutes} 分钟'}
+    
+    if name == 'study_pause':
+        session = study.get_active_session(person_id)
+        if not session:
+            raise ValueError('当前没有活动的学习会话')
+        study.pause_session(session['id'])
+        return {'ok': True, 'message': '已暂停，好好休息'}
+    
+    if name == 'study_resume':
+        session = study.get_active_session(person_id)
+        if not session:
+            raise ValueError('当前没有活动的学习会话')
+        study.resume_session(session['id'])
+        return {'ok': True, 'message': '继续加油！'}
+    
+    if name == 'study_end':
+        session = study.get_active_session(person_id)
+        if not session:
+            raise ValueError('当前没有活动的学习会话')
+        elapsed = study.compute_elapsed(session)
+        study.end_session(session['id'])
+        study_min = elapsed['study_seconds'] // 60
+        break_min = elapsed['break_seconds'] // 60
+        summary = f"今天学了 {study_min} 分钟"
+        if break_min > 0:
+            summary += f"，休息了 {break_min} 分钟"
+        summary += "，辛苦了！"
+        return {'ok': True, 'message': summary, 'elapsed': elapsed}
+
+    if name == 'study_review':
+        from . import study_report
+        period = args.get('period', 'week')
+        person = identity.person(person_id)
+        report = study_report.build_report(person_id, person['name'] if person else '', period)
+        # 报告给模型时只给标题与 markdown，stats/profile 字段太长会挤占上下文
+        return {'headline': report['headline'], 'markdown': report['markdown']}
+
+    if name == 'study_suggest':
+        from . import study_profiler
+        return study_profiler.suggest(person_id)
+
+    if name == 'study_rate':
+        session = study.get_active_session(person_id)
+        if not session:
+            raise ValueError('当前没有活动的学习会话')
+        study.rate_session(session['id'], args['score'], args.get('tags') or [])
+        return {'ok': True, 'message': '记下来了，谢谢自评！'}
+
     raise ValueError('未知工具')
 
 
 def main():
     init_db()
     agent_store.init_agent_db()
+    study.init_study_db()
     for line in sys.stdin:
         request = json.loads(line)
         if 'id' not in request:

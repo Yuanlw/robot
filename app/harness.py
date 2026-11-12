@@ -19,6 +19,10 @@ TOOL_LABELS = {
     'get_current_time': '正在查看时间', 'get_weather': '正在查询天气',
     'prepare_reminder': '正在整理提醒', 'confirm_reminder': '正在保存提醒',
     'list_reminders': '正在查看提醒', 'cancel_reminder': '正在取消提醒',
+    'study_extend': '正在延长学习时间', 'study_pause': '正在暂停学习',
+    'study_resume': '正在恢复学习', 'study_end': '正在结束学习',
+    'study_review': '正在整理学习报告', 'study_suggest': '正在查看学习建议',
+    'study_rate': '正在记录自评',
 }
 
 

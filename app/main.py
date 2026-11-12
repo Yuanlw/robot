@@ -22,7 +22,8 @@ from .voice import VoiceService
 from .llm import LLMService
 from .config import settings
 from .harness import agent
-from . import agent_store, bailian, identity
+from . import agent_store, bailian, identity, study, study_profiler
+from . import study_report
 from .csrf import CSRFMiddleware
 
 faces = FaceService()
@@ -54,17 +55,61 @@ async def reminder_loop():
         await asyncio.sleep(15)
 
 
+async def study_loop():
+    """学习陪伴主动提醒循环（第一期：自适应阈值 + 柔性提醒 + 安静时段）。"""
+    if not settings.study_enabled:
+        return
+    reminders_spoken_in_hour = []
+    while True:
+        try:
+            now = datetime.now().astimezone()
+            reminders_spoken_in_hour = [t for t in reminders_spoken_in_hour if (now - t).total_seconds() < 3600]
+            if now.hour < 8 or len(reminders_spoken_in_hour) >= settings.study_max_reminders_per_hour:
+                await asyncio.sleep(60)
+                continue
+
+            def resolver(person_id):
+                try:
+                    return study_profiler.thresholds_for_reminder(person_id)
+                except Exception:
+                    return None
+
+            needs = study.sessions_needing_reminder(
+                settings.study_focus_minutes, settings.study_break_minutes, threshold_resolver=resolver)
+            for item in needs:
+                if len(reminders_spoken_in_hour) >= settings.study_max_reminders_per_hour:
+                    break
+                sess = item['session']
+                reminder_type = item['type']
+                spoken = item['spoken']
+                if reminder_type == 'break_time':
+                    study.pause_session(sess['id'])
+                elif reminder_type == 'resume_time':
+                    study.resume_session(sess['id'])
+                await asyncio.to_thread(voice.speak, spoken)
+                study.record_reminder(sess['id'], reminder_type, str(item['elapsed']['phase_elapsed_seconds'] // 60))
+                reminders_spoken_in_hour.append(now)
+                record_event("study_reminder", {"session_id": sess['id'], "type": reminder_type, "text": spoken})
+
+        except Exception as e:
+            record_event("study_loop_error", {"error": str(e)})
+        await asyncio.sleep(30)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
     agent_store.init_agent_db()
+    study.init_study_db()
     await asyncio.to_thread(voice.warmup)
-    task = asyncio.create_task(reminder_loop())
+    reminder_task = asyncio.create_task(reminder_loop())
+    study_task = asyncio.create_task(study_loop())
     try:
         yield
     finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        reminder_task.cancel()
+        study_task.cancel()
+        await asyncio.gather(reminder_task, study_task, return_exceptions=True)
         await agent.shutdown()
 
 
@@ -541,3 +586,105 @@ async def edit_draft(draft_id: str, payload: DraftEdit):
             return agent_store.prepare(sid, {'draft_id': draft_id, 'text': payload.text, 'due_at': payload.due_at.isoformat()}, datetime.now().astimezone().isoformat(), speaker['person']['id'] if speaker['person'] else None)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
+
+
+# ===== 学习陪伴 API =====
+
+@app.post("/api/study/start")
+async def study_start(session_id: str, identity_revision: int | None = None):
+    """开始学习会话。"""
+    if not settings.study_enabled:
+        raise HTTPException(503, "学习陪伴功能未启用")
+    speaker = check_identity(session_id, identity_revision)
+    if not speaker['person']:
+        raise HTTPException(400, "需要先选择身份")
+    try:
+        sess = study.start_session(speaker['person']['id'])
+        record_event("study_start", {"session_id": sess['id'], "person_id": speaker['person']['id']})
+        return {"ok": True, "session": sess}
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.get("/api/study/current")
+async def study_current(session_id: str, identity_revision: int | None = None):
+    """获取当前学习状态。"""
+    if not settings.study_enabled:
+        return {"enabled": False}
+    speaker = check_identity(session_id, identity_revision)
+    if not speaker['person']:
+        return {"enabled": True, "session": None}
+    sess = study.get_active_session(speaker['person']['id'])
+    if not sess:
+        return {"enabled": True, "session": None}
+    elapsed = study.compute_elapsed(sess)
+    return {"enabled": True, "session": sess, "elapsed": elapsed}
+
+
+@app.post("/api/study/end")
+async def study_end(session_id: str, identity_revision: int | None = None):
+    """结束学习会话。"""
+    if not settings.study_enabled:
+        raise HTTPException(503, "学习陪伴功能未启用")
+    speaker = check_identity(session_id, identity_revision)
+    if not speaker['person']:
+        raise HTTPException(400, "需要先选择身份")
+    sess = study.get_active_session(speaker['person']['id'])
+    if not sess:
+        raise HTTPException(400, "当前没有活动的学习会话")
+    elapsed = study.compute_elapsed(sess)
+    study.end_session(sess['id'])
+    study_min = elapsed['study_seconds'] // 60
+    break_min = elapsed['break_seconds'] // 60
+    summary = f"今天学了 {study_min} 分钟"
+    if break_min > 0:
+        summary += f"，休息了 {break_min} 分钟"
+    summary += "，辛苦了！"
+    record_event("study_end", {"session_id": sess['id'], "elapsed": elapsed, "summary": summary})
+    return {"ok": True, "elapsed": elapsed, "summary": summary}
+
+
+class StudyRateIn(BaseModel):
+    session_id: str = Field(min_length=1, max_length=100)
+    score: int = Field(ge=1, le=10)
+    tags: list[str] = Field(default_factory=list, max_length=8)
+    identity_revision: int | None = None
+
+
+@app.get("/api/study/profile")
+async def study_profile(session_id: str, identity_revision: int | None = None):
+    """当前成员的学习画像（第一期：数据积累不足时返回默认节奏）。"""
+    if not settings.study_enabled:
+        return {"enabled": False}
+    speaker = check_identity(session_id, identity_revision)
+    if not speaker['person']:
+        raise HTTPException(400, "需要先选择身份")
+    return {"enabled": True, "profile": study_profiler.build_profile(speaker['person']['id'])}
+
+
+@app.get("/api/study/report")
+async def study_report_api(session_id: str, period: Literal["today", "week", "month"] = "week",
+                           identity_revision: int | None = None):
+    """学习报告（Markdown + 结构化数据）。"""
+    if not settings.study_enabled:
+        raise HTTPException(503, "学习陪伴功能未启用")
+    speaker = check_identity(session_id, identity_revision)
+    if not speaker['person']:
+        raise HTTPException(400, "需要先选择身份")
+    report = study_report.build_report(speaker['person']['id'], speaker['person']['name'], period)
+    record_event("study_report", {"person_id": speaker['person']['id'], "period": period})
+    return {"enabled": True, **report}
+
+
+@app.post("/api/study/rate")
+async def study_rate(payload: StudyRateIn):
+    """自评本次学习质量（1-10 + 场景标签）。"""
+    if not settings.study_enabled:
+        raise HTTPException(503, "学习陪伴功能未启用")
+    speaker = check_identity(payload.session_id, payload.identity_revision)
+    if not speaker['person']:
+        raise HTTPException(400, "需要先选择身份")
+    sess = study.get_active_session(speaker['person']['id'])
+    if not sess:
+        raise HTTPException(400, "当前没有活动的学习会话")
+    return study.rate_session(sess['id'], payload.score, payload.tags)
