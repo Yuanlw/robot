@@ -146,4 +146,6 @@ def suggest(person_id: int) -> dict:
         suggestions.append(f"你平均需要 {profile['avg_recovery_minutes']} 分钟才能缓过来，休息可以再长一点。")
     if profile['trend'] == 'declining':
         suggestions.append("这周学习时间比上周少，别自责，安排一次短学习把节奏找回来。")
+    from . import study_behavior
+    suggestions += study_behavior.behavior_suggestions(person_id)
     return {'profile': profile, 'suggestions': suggestions}

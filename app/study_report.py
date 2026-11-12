@@ -6,6 +6,7 @@
 """
 from datetime import datetime, timedelta
 from . import study, study_profiler
+from . import study_behavior
 from .config import settings
 
 
@@ -59,6 +60,18 @@ def build_report(person_id: int, person_name: str, period: str = 'week') -> dict
         insights.append(f"- 🧩 常见状态标签：{'、'.join(profile['distraction_patterns'])}")
     if insights:
         lines += ["## 发现的规律", "", *insights, ""]
+
+    behavior = study_behavior.analyze_behavior_pattern(person_id, days=7 if period != 'month' else 30)
+    if behavior['has_data']:
+        lines += ["## 坐姿与专注", "",
+                  f"- 🪑 端正帧占比：**{int(behavior['posture_good_ratio'] * 100)}%**（共 {behavior['frames']} 帧采样）",
+                  f"- 🔔 坐姿提醒：**{behavior['warnings_sent']} 次**",
+                  f"- ✅ 提醒后自己坐好：{'约 ' + str(int(behavior['warning_response_rate'] * 100)) + '%' if behavior['warning_response_rate'] is not None else '数据积累中'}",
+                  f"- 🧘 常见提示：{'、'.join(behavior['common_issues'])}" if behavior['common_issues'] else "- 🧘 常见提示：暂无固定问题",
+                  ""]
+        bs = study_behavior.behavior_suggestions(person_id)
+        if bs:
+            lines += [f"- {s}" for s in bs] + [""]
 
     next_steps = []
     if profile['optimal_focus_minutes'] != settings.study_focus_minutes:

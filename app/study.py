@@ -88,11 +88,26 @@ def get_session(session_id: int) -> dict | None:
 
 
 def get_active_session(person_id: int) -> dict | None:
-    """获取当前活动会话。"""
+    """获取活动（active）会话。"""
     with connection() as c:
         row = c.execute(
             "SELECT * FROM study_sessions WHERE person_id=? AND status='active'",
             (person_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_current_session(person_id: int) -> dict | None:
+    """获取当前承载中的会话（active 或 paused）。
+
+    离座自动暂停后，页面卡片、坐姿守护、结束/自评都必须还能找回这条会话；
+    只对"提醒循环"来说 paused 不算活动，其余场景一律用本函数。
+    """
+    with connection() as c:
+        row = c.execute(
+            "SELECT * FROM study_sessions WHERE person_id=? AND status IN ('active','paused') "
+            "ORDER BY id DESC LIMIT 1",
+            (person_id,),
         ).fetchone()
         return dict(row) if row else None
 

@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     study_break_minutes: int = 5
     study_max_reminders_per_hour: int = 6
 
+    # 坐姿守护（第二期 2A：默认关闭；画面仅本机内存分析，不落盘不上传）
+    vision_enabled: bool = False
+    vision_sample_seconds: int = 5
+    vision_max_bytes: int = 2 * 1024 * 1024
+
     model_config = SettingsConfigDict(env_prefix="ROBOT_", env_file=".env")
 
 

@@ -24,11 +24,13 @@ from .config import settings
 from .harness import agent
 from . import agent_store, bailian, identity, study, study_profiler
 from . import study_report
+from . import vision as vision_mod
 from .csrf import CSRFMiddleware
 
 faces = FaceService()
 voice = VoiceService()
 llm = LLMService()
+vision = vision_mod.VisionService()
 conversation_histories: dict[str, dict[str, object]] = {}
 conversation_lock = threading.Lock()
 RECENT_CONVERSATION_MESSAGES = 8
@@ -101,6 +103,7 @@ async def lifespan(_app: FastAPI):
     init_db()
     agent_store.init_agent_db()
     study.init_study_db()
+    vision_mod.init_vision_db()
     await asyncio.to_thread(voice.warmup)
     reminder_task = asyncio.create_task(reminder_loop())
     study_task = asyncio.create_task(study_loop())
@@ -614,7 +617,7 @@ async def study_current(session_id: str, identity_revision: int | None = None):
     speaker = check_identity(session_id, identity_revision)
     if not speaker['person']:
         return {"enabled": True, "session": None}
-    sess = study.get_active_session(speaker['person']['id'])
+    sess = study.get_current_session(speaker['person']['id'])
     if not sess:
         return {"enabled": True, "session": None}
     elapsed = study.compute_elapsed(sess)
@@ -629,9 +632,9 @@ async def study_end(session_id: str, identity_revision: int | None = None):
     speaker = check_identity(session_id, identity_revision)
     if not speaker['person']:
         raise HTTPException(400, "需要先选择身份")
-    sess = study.get_active_session(speaker['person']['id'])
+    sess = study.get_current_session(speaker['person']['id'])
     if not sess:
-        raise HTTPException(400, "当前没有活动的学习会话")
+        raise HTTPException(400, "当前没有进行中的学习会话")
     elapsed = study.compute_elapsed(sess)
     study.end_session(sess['id'])
     study_min = elapsed['study_seconds'] // 60
@@ -684,7 +687,102 @@ async def study_rate(payload: StudyRateIn):
     speaker = check_identity(payload.session_id, payload.identity_revision)
     if not speaker['person']:
         raise HTTPException(400, "需要先选择身份")
-    sess = study.get_active_session(speaker['person']['id'])
+    sess = study.get_current_session(speaker['person']['id'])
     if not sess:
-        raise HTTPException(400, "当前没有活动的学习会话")
+        raise HTTPException(400, "当前没有进行中的学习会话")
     return study.rate_session(sess['id'], payload.score, payload.tags)
+
+
+# ===== 坐姿守护 API（第二期 2A：帧仅内存分析，不落盘不上传） =====
+
+def _vision_person(session_id, identity_revision):
+    speaker = check_identity(session_id, identity_revision)
+    if not speaker['person']:
+        raise HTTPException(400, "需要先选择或识别成员")
+    return speaker['person']
+
+
+async def _vision_image(request_image: UploadFile) -> bytes:
+    data = await request_image.read(settings.vision_max_bytes + 1)
+    if len(data) > settings.vision_max_bytes:
+        raise HTTPException(413, "图片过大，请降低分辨率")
+    return data
+
+
+@app.get("/api/vision/status")
+async def vision_status(session_id: str, identity_revision: int | None = None):
+    if not settings.vision_enabled:
+        return {"enabled": False}
+    person = _vision_person(session_id, identity_revision)
+    return {"enabled": True, **vision.details(),
+            "calibrated": vision_mod.get_baseline(person['id']) is not None,
+            "sample_seconds": settings.vision_sample_seconds}
+
+
+@app.post("/api/vision/calibrate")
+async def vision_calibrate(image: UploadFile = File(...), session_id: str = Query(min_length=1, max_length=100),
+                           identity_revision: int | None = None):
+    """以当前姿态为基线：孩子先坐端正，点校准。"""
+    if not settings.vision_enabled:
+        raise HTTPException(503, "坐姿守护未启用")
+    if not vision.available():
+        raise HTTPException(503, "本机未安装姿态模型依赖")
+    person = _vision_person(session_id, identity_revision)
+    data = await _vision_image(image)
+    try:
+        metrics, present = await asyncio.to_thread(vision.analyze_bytes, data)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    finally:
+        data = None  # 帧立即释放
+    if not present or not metrics:
+        raise HTTPException(422, "没有看清你，请坐直面对摄像头再试")
+    vision_mod.save_baseline(person['id'], metrics)
+    vision_mod.tracker.reset(person['id'])
+    record_event("vision_calibrated", {"person_id": person['id']})
+    return {"ok": True, "baseline": metrics}
+
+
+@app.post("/api/vision/frame")
+async def vision_frame(image: UploadFile = File(...), session_id: str = Query(min_length=1, max_length=100),
+                       identity_revision: int | None = None):
+    """浏览器每 sample_seconds 送一帧：只回数值，只存数值。"""
+    if not settings.vision_enabled:
+        raise HTTPException(503, "坐姿守护未启用")
+    if not vision.available():
+        raise HTTPException(503, "本机未安装姿态模型依赖")
+    person = _vision_person(session_id, identity_revision)
+    sess = study.get_current_session(person['id'])
+    if not sess:
+        return {"ignored": True, "reason": "没有进行中的学习会话，守护已暂停"}
+    baseline = vision_mod.get_baseline(person['id'])
+    data = await _vision_image(image)
+    try:
+        metrics, present = await asyncio.to_thread(vision.analyze_bytes, data)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    finally:
+        data = None
+    issues = vision_mod.check_issues(metrics, baseline) if metrics else []
+    action = vision_mod.tracker.record(person['id'], issues, present)
+    speak_texts = [vision_mod.WARNING_TEXT[i] for i in action['warnings'][:1]]
+    if action['left']:
+        if sess['status'] == 'active':
+            study.pause_session(sess['id'])
+        speak_texts.append("检测到你不在了，计时先暂停了。")
+    if action['returned']:
+        current = study.get_session(sess['id'])
+        if current and current['status'] == 'paused':
+            study.resume_session(sess['id'])
+        speak_texts.append("欢迎回来，计时继续。")
+    warning_text = " ".join(speak_texts) if speak_texts else None
+    # 之前提醒过的问题本轮消失：3 分钟窗口内记为已响应
+    if present and metrics:
+        vision_mod.mark_responded(person['id'], [k for k in vision_mod.WARNING_TEXT if k not in issues])
+    vision_mod.log_frame(sess['id'], person['id'], present, metrics, issues,
+                         action['warnings'], warning_text)
+    if speak_texts:
+        await asyncio.to_thread(voice.speak, warning_text)
+        record_event("vision_warning", {"person_id": person['id'], "text": warning_text})
+    return {"present": present, "issues": issues, "warnings": speak_texts,
+            "paused": action['left'], "resumed": action['returned'], "calibrated": baseline is not None}

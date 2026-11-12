@@ -3,3 +3,4 @@
 kokoro-onnx==0.6.1
 misaki-fork[zh]==0.9.6
 soundfile==0.14.0
+mediapipe==0.10.21

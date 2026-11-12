@@ -120,31 +120,31 @@ def execute(name, args, context):
         raise ValueError('需要先选择身份')
     
     if name == 'study_extend':
-        session = study.get_active_session(person_id)
+        session = study.get_current_session(person_id)
         if not session:
-            raise ValueError('当前没有活动的学习会话')
+            raise ValueError('当前没有进行中的学习会话')
         minutes = args.get('minutes', 5)
         study.record_reminder(session['id'], 'extend', str(minutes))
         return {'ok': True, 'message': f'好的，再给你 {minutes} 分钟'}
     
     if name == 'study_pause':
-        session = study.get_active_session(person_id)
+        session = study.get_current_session(person_id)
         if not session:
-            raise ValueError('当前没有活动的学习会话')
+            raise ValueError('当前没有进行中的学习会话')
         study.pause_session(session['id'])
         return {'ok': True, 'message': '已暂停，好好休息'}
     
     if name == 'study_resume':
-        session = study.get_active_session(person_id)
+        session = study.get_current_session(person_id)
         if not session:
-            raise ValueError('当前没有活动的学习会话')
+            raise ValueError('当前没有进行中的学习会话')
         study.resume_session(session['id'])
         return {'ok': True, 'message': '继续加油！'}
     
     if name == 'study_end':
-        session = study.get_active_session(person_id)
+        session = study.get_current_session(person_id)
         if not session:
-            raise ValueError('当前没有活动的学习会话')
+            raise ValueError('当前没有进行中的学习会话')
         elapsed = study.compute_elapsed(session)
         study.end_session(session['id'])
         study_min = elapsed['study_seconds'] // 60
@@ -168,9 +168,9 @@ def execute(name, args, context):
         return study_profiler.suggest(person_id)
 
     if name == 'study_rate':
-        session = study.get_active_session(person_id)
+        session = study.get_current_session(person_id)
         if not session:
-            raise ValueError('当前没有活动的学习会话')
+            raise ValueError('当前没有进行中的学习会话')
         study.rate_session(session['id'], args['score'], args.get('tags') or [])
         return {'ok': True, 'message': '记下来了，谢谢自评！'}
 
@@ -181,6 +181,8 @@ def main():
     init_db()
     agent_store.init_agent_db()
     study.init_study_db()
+    from . import vision as _vision
+    _vision.init_vision_db()
     for line in sys.stdin:
         request = json.loads(line)
         if 'id' not in request:

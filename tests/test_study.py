@@ -8,6 +8,7 @@ from unittest.mock import patch
 from app.db import init_db, connection
 from app import study
 from app import study_profiler, study_report
+from app import vision as vision_module
 
 
 class StudyCase(unittest.TestCase):
@@ -19,6 +20,7 @@ class StudyCase(unittest.TestCase):
         self.addCleanup(p.stop)
         init_db()
         study.init_study_db()
+        vision_module.init_vision_db()
 
     def make_session(self, person_id, started, status='active', study_seconds=0, break_seconds=0):
         with connection() as c:
