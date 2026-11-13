@@ -22,10 +22,17 @@ LEFT_SHOULDER, RIGHT_SHOULDER = 11, 12
 HEAD_ROLL_LIMIT = 10.0       # 头部侧倾角度上限（无基线时的绝对值）
 SHOULDER_ROLL_LIMIT = 8.0    # 肩膀水平差上限（无基线时的绝对值）
 POSTURE_MARGIN = 8.0         # 相对基线的容差：角度超过"个人校准值+此裕度"才算问题
-NEAR_RATIO = 1.12            # 肩宽相对基线超过此比例 = 离屏过近
-HEAD_DROP_RATIO = 0.62       # 鼻-肩垂直距离低于基线此比例 = 头过低/趴桌
-MIN_STREAK = 3               # 连续 N 帧同一问题才提醒（防误报）
+SEVERE_MARGIN = 5.0          # 分级：超过相对限再 +5° 才算重度（只有重度有资格开口）
+NEAR_RATIO = 1.12            # 肩宽相对基线超过此比例 = 离屏过近（轻度）
+NEAR_SEVERE_RATIO = 1.30     # 离屏过近的重度线
+HEAD_DROP_RATIO = 0.62       # 鼻-肩垂直距离低于基线此比例 = 头过低（轻度）
+HEAD_DROP_SEVERE_RATIO = 0.48  # 头过低的重度线
+MIN_STREAK = 3               # 连续 N 帧同一重度问题才提醒（防瞬时动作/抖动误报）
 WARNING_COOLDOWN_MIN = 5     # 同一问题提醒冷却（验证期从 10 分钟放宽到 5，便于采样）
+MAX_SPEAK_PER_ISSUE = 2      # 同一问题单场会话最多开口次数，超过只记录不唠叨
+SUSPECT_POOR_RATIO = 0.6     # 高质量帧 poor 占比超过此值 → 怀疑基线/机位而非孩子
+SUSPECT_MIN_FRAMES = 20      # 占比判定所需最少高质量帧样本
+VISIBILITY_MIN = 0.6         # 关键点平均可见度低于此值的帧不参与任何判定
 ABSENT_PAUSE_FRAMES = 3      # 连续 N 帧无人 → 暂停计时
 PRESENT_RESUME_FRAMES = 2    # 暂停后连续 N 帧有人 → 恢复计时
 # 校准质量门槛：基线帧本身超过这些角度说明机位太歪或没坐正，拒绝入库
@@ -58,29 +65,33 @@ def compute_metrics(landmarks) -> dict | None:
             "shoulder_width": round(width, 4), "head_drop": round(head_drop, 4)}
 
 
-def check_issues(metrics: dict, baseline: dict) -> list[str]:
-    """对照基线输出问题标签列表。
+def issue_severities(metrics: dict, baseline: dict) -> dict:
+    """判定每个问题的严重度：{问题: 'mild'|'severe'}。
 
-    2026-11-13 实机教训：笔记本摄像头仰拍会系统性抬高肩线/头倾角度，
-    绝对阈值造成 64% 误判。角度类指标改为"个人校准值 + 裕度"的相对判定；
-    无基线时退回绝对阈值。
+    决策层第③级：轻度只记录进数据（供报告分析），重度才有资格进入
+    持续性判定和开口流程。2026-11-13 review：把"测量"和"判断"分开。
     """
-    issues = []
+    out = {}
     head_limit = HEAD_ROLL_LIMIT
     shoulder_limit = SHOULDER_ROLL_LIMIT
     if baseline:
         head_limit = max(HEAD_ROLL_LIMIT, baseline.get('head_roll', 0) + POSTURE_MARGIN)
         shoulder_limit = max(SHOULDER_ROLL_LIMIT, baseline.get('shoulder_roll', 0) + POSTURE_MARGIN)
     if metrics['head_roll'] > head_limit:
-        issues.append('头歪')
+        out['头歪'] = 'severe' if metrics['head_roll'] > head_limit + SEVERE_MARGIN else 'mild'
     if metrics['shoulder_roll'] > shoulder_limit:
-        issues.append('肩不平')
+        out['肩不平'] = 'severe' if metrics['shoulder_roll'] > shoulder_limit + SEVERE_MARGIN else 'mild'
     if baseline:
         if metrics['shoulder_width'] > baseline['shoulder_width'] * NEAR_RATIO:
-            issues.append('离屏过近')
+            out['离屏过近'] = 'severe' if metrics['shoulder_width'] > baseline['shoulder_width'] * NEAR_SEVERE_RATIO else 'mild'
         if metrics['head_drop'] < baseline['head_drop'] * HEAD_DROP_RATIO:
-            issues.append('头过低')
-    return issues
+            out['头过低'] = 'severe' if metrics['head_drop'] < baseline['head_drop'] * HEAD_DROP_SEVERE_RATIO else 'mild'
+    return out
+
+
+def check_issues(metrics: dict, baseline: dict) -> list[str]:
+    """问题标签列表（含轻度和重度）。兼容旧调用方；开口决策用 issue_severities。"""
+    return list(issue_severities(metrics, baseline).keys())
 
 
 def validate_calibration(metrics: dict) -> str | None:
@@ -100,33 +111,46 @@ WARNING_TEXT = {
 }
 
 
-class WarningTracker:
-    """连续帧判定 + 冷却，纯内存状态，可单测。同时处理到/离座迁移。"""
+class PostureJudge:
+    """姿态判断决策层（六级漏斗）：检测层只产数字，开口之前必须过这里。
+
+    ① 质量门：低可见度帧不参与判定、不清连击（防遮挡/侧身闪烁）
+    ② 相对限：issue_severities 已完成（个人基线+裕度）
+    ③ 分级：只有 severe 进入连击与开口；mild 只入库供报告
+    ④ 持续性：severe 连续 MIN_STREAK 帧才成立（滤瞬时动作与抖动）
+    ⑤ 预算：同一问题单场最多开口 MAX_SPEAK_PER_ISSUE 次，之后只记录（唠叨无益）
+    ⑥ 系统怀疑：高质量帧≥SUSPECT_MIN_FRAMES 且 poor 占比>SUSPECT_POOR_RATIO →
+       判定"基线/机位错了，不是孩子错了"→ 停全部姿态播报、提示重校准；
+       重新校准（reset）后清零重来。2026-11-13 昨晚 64% poor 率就是这个场景。
+
+    到/离座迁移与旧版一致（连续 3 帧无人暂停、回来 2 帧恢复）。
+    纯内存状态、确定性规则，可单测。
+    """
 
     def __init__(self):
         self._lock = threading.Lock()
         self._state: dict[int, dict] = {}
 
-    def record(self, person_id: int, issues: list[str], present: bool,
-               now: datetime = None) -> dict:
-        """返回 {'warnings': [标签], 'left': bool, 'returned': bool}。"""
+    def _session_state(self, person_id: int, session_id) -> dict:
+        st = self._state.setdefault(person_id, {})
+        if st.get('session_id') != session_id:
+            absent = st.get('_absent')  # 到/离座状态跨会话保留
+            st.clear()
+            st.update({'session_id': session_id, 'warned': {},
+                       'quality_frames': 0, 'poor_frames': 0, 'suspect': False})
+            if absent:
+                st['_absent'] = absent
+        return st
+
+    def record(self, person_id: int, session_id, severities: dict, present: bool,
+               quality_ok: bool, now: datetime = None) -> dict:
+        """返回 {'warnings':[标签], 'left', 'returned', 'suppressed', 'suspect_new', 'stats'}。"""
         now = now or datetime.now().astimezone()
         with self._lock:
-            st = self._state.setdefault(person_id, {})
-            warnings = []
-            for issue, text in WARNING_TEXT.items():
-                bad = issue in issues
-                entry = st.setdefault(issue, {'streak': 0, 'last_warn': None})
-                if bad:
-                    entry['streak'] += 1
-                    cooled = entry['last_warn'] is None or (now - entry['last_warn']).total_seconds() >= WARNING_COOLDOWN_MIN * 60
-                    if entry['streak'] >= MIN_STREAK and cooled:
-                        warnings.append(issue)
-                        entry['last_warn'] = now
-                        entry['streak'] = 0
-                else:
-                    entry['streak'] = 0
-            # 到/离座
+            st = self._session_state(person_id, session_id)
+            warnings, suppressed, suspect_new, nag_limited = [], None, False, False
+
+            # 到/离座迁移
             absent = st.setdefault('_absent', {'streak': 0, 'paused': False, 'present_streak': 0})
             left = returned = False
             if not present:
@@ -145,14 +169,53 @@ class WarningTracker:
                         returned = True
                 else:
                     absent['present_streak'] = 0
-            return {'warnings': warnings, 'left': left, 'returned': returned}
+
+            # ①质量门：低质量帧跳过全部姿态判定（不清连击，避免遮挡闪烁重置）
+            if present and quality_ok:
+                st['quality_frames'] += 1
+                if severities:
+                    st['poor_frames'] += 1
+
+                # ⑥系统怀疑
+                if not st['suspect'] and st['quality_frames'] >= SUSPECT_MIN_FRAMES \
+                        and st['poor_frames'] / st['quality_frames'] > SUSPECT_POOR_RATIO:
+                    st['suspect'] = True
+                    suspect_new = True
+                if st['suspect']:
+                    suppressed = 'suspect_calibration'
+                else:
+                    # ③④⑤：重度问题连击 + 冷却 + 单场预算
+                    for issue in WARNING_TEXT:
+                        entry = st['warned'].setdefault(issue, {'streak': 0, 'last_warn': None, 'spoken': 0})
+                        if severities.get(issue) == 'severe':
+                            entry['streak'] += 1
+                            cooled = (entry['last_warn'] is None or
+                                      (now - entry['last_warn']).total_seconds() >= WARNING_COOLDOWN_MIN * 60)
+                            if entry['streak'] >= MIN_STREAK and cooled:
+                                entry['streak'] = 0
+                                if entry['spoken'] < MAX_SPEAK_PER_ISSUE:
+                                    warnings.append(issue)
+                                    entry['last_warn'] = now
+                                    entry['spoken'] += 1
+                                else:
+                                    nag_limited = True
+                        else:
+                            entry['streak'] = 0
+                    if nag_limited and not warnings:
+                        suppressed = 'nag_limit'
+
+            return {'warnings': warnings, 'left': left, 'returned': returned,
+                    'suppressed': suppressed, 'suspect_new': suspect_new,
+                    'stats': {'quality_frames': st['quality_frames'],
+                              'poor_frames': st['poor_frames'], 'suspect': st['suspect']}}
 
     def reset(self, person_id: int):
+        """重新校准/会话收口时清零（含 suspect 抑制）。"""
         with self._lock:
             self._state.pop(person_id, None)
 
 
-tracker = WarningTracker()
+judge = PostureJudge()
 
 
 def init_vision_db():
@@ -242,8 +305,12 @@ class VisionService:
                                                 min_detection_confidence=0.5)
         return self._pose
 
-    def analyze_bytes(self, data: bytes) -> tuple[dict | None, bool]:
-        """bytes(JPEG/PNG) → (metrics, present)。帧不落盘；异常抛出由调用方处理。"""
+    def analyze_bytes(self, data: bytes) -> tuple[dict | None, bool, bool]:
+        """bytes(JPEG/PNG) → (metrics, present, quality_ok)。帧不落盘；异常抛出由调用方处理。
+
+        quality_ok：5 个关键点（鼻/双耳/双肩）平均可见度 ≥ VISIBILITY_MIN。
+        遮挡、侧身、画面残缺时 MediaPipe 仍会外推出地标，角度不可信——决策层第①级。
+        """
         import cv2
         import numpy as np
         arr = np.frombuffer(data, np.uint8)
@@ -253,6 +320,9 @@ class VisionService:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         result = self._model().process(rgb)
         if not result.pose_landmarks:
-            return None, False
-        lm = [(p.x, p.y, p.z) for p in result.pose_landmarks.landmark]
-        return compute_metrics(lm), True
+            return None, False, False
+        lms = result.pose_landmarks.landmark
+        metrics = compute_metrics([(p.x, p.y, p.z) for p in lms])
+        key_vis = [lms[i].visibility for i in (NOSE, LEFT_EAR, RIGHT_EAR, LEFT_SHOULDER, RIGHT_SHOULDER)]
+        quality_ok = metrics is not None and (sum(key_vis) / len(key_vis)) >= VISIBILITY_MIN
+        return metrics, True, quality_ok

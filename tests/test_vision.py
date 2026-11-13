@@ -49,44 +49,94 @@ class MetricsTests(unittest.TestCase):
         self.assertIsNone(v.compute_metrics([]))
 
 
-class TrackerTests(unittest.TestCase):
-    def test_streak_then_warn_then_cooldown(self):
-        t = v.WarningTracker()
-        now = datetime(2026, 11, 12, 10, 0)
-        for i in range(2):
-            r = t.record(1, ['头歪'], True, now + timedelta(seconds=5 * (i + 1)))
-            self.assertEqual(r['warnings'], [])
-        r = t.record(1, ['头歪'], True, now + timedelta(seconds=15))
-        self.assertEqual(r['warnings'], ['头歪'])
-        # 冷却 10 分钟内不再提醒（重新攒满 3 帧也不行）
-        for i in range(3):
-            r = t.record(1, ['头歪'], True, now + timedelta(minutes=5))
-            self.assertEqual(r['warnings'], [])
-        # 清一次重置连击，冷却过后再次满连击才提醒
-        t.record(1, [], True, now + timedelta(minutes=6))
-        for i in range(3):
-            r = t.record(1, ['头歪'], True, now + timedelta(minutes=11))
-        self.assertEqual(r['warnings'], ['头歪'])
+class JudgeTests(unittest.TestCase):
+    """决策层（六级漏斗）测试：severe 连击/冷却/预算、mild 静默、质量门、系统怀疑。"""
 
-    def test_intermittent_issue_does_not_accumulate_across_clear(self):
-        t = v.WarningTracker()
-        base = datetime(2026, 11, 12, 10, 0)
-        t.record(1, ['头歪'], True, base)
-        t.record(1, ['头歪'], True, base + timedelta(seconds=5))
-        t.record(1, [], True, base + timedelta(seconds=10))   # 坐正一次
-        r = t.record(1, ['头歪'], True, base + timedelta(seconds=15))
+    def _rec(self, j, sev, present=True, quality=True, now=None, pid=1, sid=9):
+        return j.record(pid, sid, sev, present, quality, now)
+
+    def test_severe_streak_cooldown_budget(self):
+        j = v.PostureJudge()
+        base = datetime(2026, 11, 13, 10, 0)
+        sev = {'头歪': 'severe'}
+        for i in range(2):
+            self.assertEqual(self._rec(j, sev, now=base + timedelta(seconds=5 * (i + 1)))['warnings'], [])
+        r = self._rec(j, sev, now=base + timedelta(seconds=15))
+        self.assertEqual(r['warnings'], ['头歪'])  # 连续3帧重度 → 开口（第1次）
+        for _ in range(3):  # 冷却期内即使连击满也不开口
+            r = self._rec(j, sev, now=base + timedelta(minutes=2))
+        self.assertEqual(r['warnings'], [])
+        self._rec(j, {}, now=base + timedelta(minutes=3))  # 坐正一次清连击
+        for _ in range(3):
+            r = self._rec(j, sev, now=base + timedelta(minutes=6))
+        self.assertEqual(r['warnings'], ['头歪'])  # 冷却已过 → 第2次
+        self._rec(j, {}, now=base + timedelta(minutes=7))
+        for _ in range(3):
+            r = self._rec(j, sev, now=base + timedelta(minutes=12))
+        self.assertEqual(r['warnings'], [])        # 预算(2次)用完
+        self.assertEqual(r['suppressed'], 'nag_limit')
+
+    def test_mild_never_speaks(self):
+        j = v.PostureJudge()
+        now = datetime(2026, 11, 13, 10, 0)
+        for i in range(10):
+            r = self._rec(j, {'头歪': 'mild', '肩不平': 'mild'}, now=now + timedelta(seconds=5 * i))
         self.assertEqual(r['warnings'], [])
 
+    def test_low_quality_frames_ignored(self):
+        j = v.PostureJudge()
+        now = datetime(2026, 11, 13, 10, 0)
+        for i in range(6):
+            r = self._rec(j, {'头歪': 'severe'}, quality=False, now=now + timedelta(seconds=5 * i))
+        self.assertEqual(r['warnings'], [])
+        self.assertEqual(r['stats']['quality_frames'], 0)
+
+    def test_intermittent_severe_resets_streak(self):
+        j = v.PostureJudge()
+        base = datetime(2026, 11, 13, 10, 0)
+        self._rec(j, {'头歪': 'severe'}, now=base)
+        self._rec(j, {'头歪': 'severe'}, now=base + timedelta(seconds=5))
+        self._rec(j, {}, now=base + timedelta(seconds=10))  # 坐正一次
+        r = self._rec(j, {'头歪': 'severe'}, now=base + timedelta(seconds=15))
+        self.assertEqual(r['warnings'], [])
+
+    def test_suspect_calibration_suppresses_and_reset_clears(self):
+        j = v.PostureJudge()
+        now = datetime(2026, 11, 13, 10, 0)
+        suspect_new_seen = False
+        for i in range(20):  # 20帧高质量、70% poor（mild 也计入 poor）
+            sev = {'头歪': 'mild'} if i % 10 < 7 else {}
+            r = self._rec(j, sev, now=now + timedelta(seconds=5 * i))
+            suspect_new_seen |= r['suspect_new']
+        self.assertTrue(r['stats']['suspect'])
+        self.assertTrue(suspect_new_seen)
+        self.assertEqual(r['suppressed'], 'suspect_calibration')
+        for _ in range(4):  # 抑制后即使重度连击也闭嘴
+            r = self._rec(j, {'头歪': 'severe'}, now=now + timedelta(minutes=5))
+        self.assertEqual(r['warnings'], [])
+        j.reset(1)  # 重新校准 → 清零重来
+        r = self._rec(j, {}, now=now + timedelta(minutes=6))
+        self.assertFalse(r['stats']['suspect'])
+
+    def test_session_switch_resets_budget(self):
+        j = v.PostureJudge()
+        now = datetime(2026, 11, 13, 10, 0)
+        for k in range(3):
+            j.record(1, 9, {'头歪': 'severe'}, True, True, now + timedelta(seconds=5 * k))
+        for k in range(3):
+            j.record(1, 9, {'头歪': 'severe'}, True, True, now + timedelta(minutes=6))
+        for k in range(3):  # 换新会话 → 预算重置
+            r = j.record(1, 10, {'头歪': 'severe'}, True, True, now + timedelta(minutes=12))
+        self.assertEqual(r['warnings'], ['头歪'])
+
     def test_absent_pauses_and_return_resumes(self):
-        t = v.WarningTracker()
-        base = datetime(2026, 11, 12, 10, 0)
-        self.assertFalse(t.record(1, [], False, base)['left'])
-        self.assertFalse(t.record(1, [], False, base + timedelta(seconds=5))['left'])
-        r = t.record(1, [], False, base + timedelta(seconds=10))
-        self.assertTrue(r['left'])
-        self.assertFalse(t.record(1, [], True, base + timedelta(seconds=15))['returned'])
-        r = t.record(1, [], True, base + timedelta(seconds=20))
-        self.assertTrue(r['returned'])
+        j = v.PostureJudge()
+        base = datetime(2026, 11, 13, 10, 0)
+        self.assertFalse(j.record(1, 9, {}, False, False, base)['left'])
+        self.assertFalse(j.record(1, 9, {}, False, False, base + timedelta(seconds=5))['left'])
+        self.assertTrue(j.record(1, 9, {}, False, False, base + timedelta(seconds=10))['left'])
+        self.assertFalse(j.record(1, 9, {}, True, True, base + timedelta(seconds=15))['returned'])
+        self.assertTrue(j.record(1, 9, {}, True, True, base + timedelta(seconds=20))['returned'])
 
 
 class StudyCase(unittest.TestCase):
@@ -184,3 +234,19 @@ class CalibrationGateTests(unittest.TestCase):
     def test_extreme_frame_rejected(self):
         self.assertIsNotNone(v.validate_calibration({'head_roll': 20.0, 'shoulder_roll': 5.0}))
         self.assertIsNotNone(v.validate_calibration({'head_roll': 3.0, 'shoulder_roll': 30.0}))
+
+
+class SeverityTests(unittest.TestCase):
+    def test_severity_levels_angles(self):
+        base = {'shoulder_width': 0.3, 'head_drop': 0.3, 'head_roll': 0.0, 'shoulder_roll': 0.0}
+        mild = v.compute_metrics(landmarks(tilt_deg=12))   # 10<12≤15 → mild
+        self.assertEqual(v.issue_severities(mild, base).get('头歪'), 'mild')
+        severe = v.compute_metrics(landmarks(tilt_deg=18))  # >15 → severe
+        self.assertEqual(v.issue_severities(severe, base).get('头歪'), 'severe')
+
+    def test_severity_levels_distance(self):
+        base = {'shoulder_width': 0.3, 'head_drop': 0.3, 'head_roll': 0.0, 'shoulder_roll': 0.0}
+        mild = v.compute_metrics(landmarks(width=0.36))    # 1.12<1.2≤1.30 → mild
+        self.assertEqual(v.issue_severities(mild, base).get('离屏过近'), 'mild')
+        severe = v.compute_metrics(landmarks(width=0.42))  # 1.4 > 1.30 → severe
+        self.assertEqual(v.issue_severities(severe, base).get('离屏过近'), 'severe')

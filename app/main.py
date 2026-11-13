@@ -72,7 +72,7 @@ async def study_loop():
             now = datetime.now().astimezone()
 
             for sid, pid, action, reason in study.reconcile_sessions(now):
-                vision_mod.tracker.reset(pid)
+                vision_mod.judge.reset(pid)
                 record_event("study_auto", {"session_id": sid, "action": action, "reason": reason})
 
             if now.hour >= 8:
@@ -756,18 +756,18 @@ async def vision_calibrate(image: UploadFile = File(...), session_id: str = Quer
     person = _vision_person(session_id, identity_revision)
     data = await _vision_image(image)
     try:
-        metrics, present = await asyncio.to_thread(vision.analyze_bytes, data)
+        metrics, present, quality_ok = await asyncio.to_thread(vision.analyze_bytes, data)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     finally:
         data = None  # 帧立即释放
-    if not present or not metrics:
-        raise HTTPException(422, "没有看清你，请坐直面对摄像头再试")
+    if not present or not metrics or not quality_ok:
+        raise HTTPException(422, "没有看清你（需要正对摄像头、光线充足、头肩完整入镜），请调整后重试")
     gate_error = vision_mod.validate_calibration(metrics)
     if gate_error:
         raise HTTPException(422, gate_error)
     vision_mod.save_baseline(person['id'], metrics)
-    vision_mod.tracker.reset(person['id'])
+    vision_mod.judge.reset(person['id'])  # 新基线生效：清零连击/预算/怀疑抑制
     record_event("vision_calibrated", {"person_id": person['id']})
     return {"ok": True, "baseline": metrics}
 
@@ -787,15 +787,19 @@ async def vision_frame(image: UploadFile = File(...), session_id: str = Query(mi
     baseline = vision_mod.get_baseline(person['id'])
     data = await _vision_image(image)
     try:
-        metrics, present = await asyncio.to_thread(vision.analyze_bytes, data)
+        metrics, present, quality_ok = await asyncio.to_thread(vision.analyze_bytes, data)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     finally:
         data = None
-    issues = vision_mod.check_issues(metrics, baseline) if metrics else []
-    action = vision_mod.tracker.record(person['id'], issues, present)
+    severities = vision_mod.issue_severities(metrics, baseline) if metrics else {}
+    issues = list(severities)
+    action = vision_mod.judge.record(person['id'], sess['id'], severities, present, quality_ok)
     prefix = f"{person['name']}，" if person.get('name') else ''
     speak_texts = [prefix + vision_mod.WARNING_TEXT[i] for i in action['warnings'][:1]]
+    if action.get('suspect_new'):
+        speak_texts.append("我可能看错了你的坐姿，请在页面上重新校准一下。")
+        record_event("vision_suspect_calibration", {"person_id": person['id'], "stats": action['stats']})
     if action['left']:
         if sess['status'] == 'active':
             study.pause_session(sess['id'])
@@ -817,5 +821,8 @@ async def vision_frame(image: UploadFile = File(...), session_id: str = Query(mi
             record_event("vision_warning", {"person_id": person['id'], "text": warning_text})
         except Exception as exc:  # 播报失败不影响守护与状态流转，只记录
             record_event("vision_warning_failed", {"person_id": person['id'], "error": str(exc)[:120]})
-    return {"present": present, "issues": issues, "warnings": speak_texts,
-            "paused": action['left'], "resumed": action['returned'], "calibrated": baseline is not None}
+    return {"present": present, "quality_ok": quality_ok, "issues": issues,
+            "severe": [i for i, s in severities.items() if s == 'severe'],
+            "warnings": speak_texts, "paused": action['left'], "resumed": action['returned'],
+            "suppressed": action.get('suppressed'), "stats": action.get('stats'),
+            "calibrated": baseline is not None}
