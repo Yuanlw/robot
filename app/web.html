@@ -254,10 +254,12 @@ $('reminderForm').onsubmit=async e=>{e.preventDefault();if(!speaker||identityBus
 $('saveReminderEdit').onclick=async()=>{const id=$('editReminderId').value,text=$('editReminderText').value.trim(),when=new Date($('editReminderDue').value===localDateInput($('editReminderDue').dataset.original)?$('editReminderDue').dataset.original:$('editReminderDue').value),status=$('editReminderStatus');if(!text||Number.isNaN(when.getTime())||when<=new Date()){status.textContent='请填写内容，并选择未来时间';return}try{if(id==='draft'){await draftEditCallback?.({text,due_at:when.toISOString()});$('editReminderDialog').close();return}const r=await fetch(scopedUrl('/api/reminders/'+id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,due_at:when.toISOString(),scope:$('reminderScope').value})});const body=await r.json();if(!r.ok)throw Error(body.detail||'保存失败');$('editReminderDialog').close();await loadReminders()}catch(e){status.textContent=e.message}}
 let stream;async function openCamera(){try{stream=await navigator.mediaDevices.getUserMedia({video:true});$('camera').hidden=false;$('camera').srcObject=stream;$('visionStatus').textContent='摄像头已打开，可以识别或注册';$('visionStatus').className='status ok'}catch(e){$('visionStatus').textContent='无法打开摄像头：'+e.message;$('visionStatus').className='status warn'}}$('startCamera').onclick=openCamera;
 async function photo(endpoint,extra={}){if(!stream)throw Error('请先打开摄像头');const v=$('camera'),c=$('snapshot');c.width=v.videoWidth;c.height=v.videoHeight;c.getContext('2d').drawImage(v,0,0);const blob=await new Promise(ok=>c.toBlob(ok,'image/jpeg',.9));const f=new FormData();f.append('image',blob,'camera.jpg');Object.entries(extra).forEach(([k,v])=>f.append(k,v));const r=await fetch(endpoint,{method:'POST',body:f});const data=await r.json();if(!r.ok)throw Error(data.detail||'视觉处理失败');return data}
+async function captureBlob(){if(!stream)throw Error('请先打开摄像头');const v=$('camera'),c=$('snapshot');c.width=v.videoWidth;c.height=v.videoHeight;c.getContext('2d').drawImage(v,0,0);return await new Promise(ok=>c.toBlob(ok,'image/jpeg',.9))}
+async function photoBurst(endpoint,frames,extra={}){if(!stream)throw Error('请先打开摄像头');const f=new FormData();for(let i=0;i<frames;i++){f.append('images',await captureBlob(),'frame'+i+'.jpg');if(i<frames-1)await new Promise(r=>setTimeout(r,280))}Object.entries(extra).forEach(([k,v])=>f.append(k,v));const r=await fetch(endpoint,{method:'POST',body:f});const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.detail||'视觉处理失败');return d}
 $('recognize').onclick=async()=>{
   if(busy||identityBusy||listening||!speaker){$('visionStatus').textContent='请先结束当前对话或录音';return}
   identityBusy=true;
-  try{const d=await photo('/api/faces/recognize',{session_id:sessionId,identity_revision:speaker.revision});applyIdentity(d.identity,true);$('visionStatus').textContent=d.message;$('visionStatus').className='status'+(d.needs_selection?' warn':' ok');await loadPeople();loadReminders();loadDrafts();if(!d.needs_selection)showPane('homePane')}
+  try{const d=await photoBurst('/api/faces/recognize-burst',3,{session_id:sessionId,identity_revision:speaker.revision});applyIdentity(d.identity,true);$('visionStatus').textContent=d.message;$('visionStatus').className='status'+(d.needs_selection?' warn':' ok');await loadPeople();loadReminders();loadDrafts();if(!d.needs_selection)showPane('homePane')}
   catch(e){$('visionStatus').textContent=e.message;$('visionStatus').className='status warn'}finally{identityBusy=false}
 };
 let enrollBlob=null,lastPreviewUrl=null;
@@ -277,7 +279,7 @@ function capturePreview(){
 }
 function memberCard(p){
   const card=document.createElement('div');card.className='member-card';
-  const name=document.createElement('span');name.className='member-name';name.textContent=p.name;
+  const name=document.createElement('span');name.className='member-name';name.textContent=p.name+(p.samples?'（'+p.samples+'个样本）':'');
   const actions=document.createElement('div');actions.className='member-actions';
   const re=document.createElement('button');re.className='secondary';re.textContent='重新录脸';
   re.onclick=()=>{
@@ -300,7 +302,21 @@ function memberCard(p){
       await loadPeople();loadReminders();loadDrafts();await loadIdentity();loadEvents();
     }catch(e){$('visionStatus').textContent=e.message;$('visionStatus').className='status warn';del.disabled=false}
   };
-  actions.append(re,del);card.append(name,actions);return card;
+  const add=document.createElement('button');add.className='secondary';add.textContent='+角度样本';
+  add.onclick=async()=>{
+    if(busy||identityBusy)return;
+    add.disabled=true;
+    try{
+      if(!stream)await openCamera();
+      const blob=await captureBlob();
+      const f=new FormData();f.append('name',p.name);f.append('append','true');f.append('image',blob,'append.jpg');
+      const r=await fetch('/api/faces/enroll',{method:'POST',body:f});
+      const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.detail||'补充失败');
+      $('visionStatus').textContent='已为 '+p.name+' 补充角度样本，当前 '+(d.samples||'?')+' 个（建议正脸/左/右各一张）。';$('visionStatus').className='status ok';
+      await loadPeople();
+    }catch(e){$('visionStatus').textContent=e.message;$('visionStatus').className='status warn'}finally{add.disabled=false}
+  };
+  actions.append(add,re,del);card.append(name,actions);return card;
 }
 function renderMembers(members){
   const list=$('memberList');list.replaceChildren();

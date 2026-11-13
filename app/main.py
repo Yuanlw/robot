@@ -110,6 +110,7 @@ async def lifespan(_app: FastAPI):
     agent_store.init_agent_db()
     study.init_study_db()
     vision_mod.init_vision_db()
+    faces.init_face_db()
     await asyncio.to_thread(voice.warmup)
     reminder_task = asyncio.create_task(reminder_loop())
     study_task = asyncio.create_task(study_loop())
@@ -275,7 +276,11 @@ class SpeakerIn(BaseModel):
 
 @app.get('/api/people')
 def list_people():
-    return identity.people()
+    people = identity.people()
+    counts = faces.sample_counts()
+    for p in people:
+        p['samples'] = counts.get(p['id'], 0)
+    return people
 
 
 @app.delete('/api/people/{person_id}')
@@ -329,16 +334,54 @@ async def face_image(image):
 
 
 @app.post("/api/faces/enroll")
-async def enroll_face(name: str = Form(..., min_length=1, max_length=80), image: UploadFile = File(...)):
+async def enroll_face(name: str = Form(..., min_length=1, max_length=80), append: bool = Form(False),
+                      image: UploadFile = File(...)):
     if not name.strip():
         raise HTTPException(422, '请填写姓名')
     path = await face_image(image)
     try:
-        return await asyncio.to_thread(faces.enroll, name.strip(), str(path))
+        return await asyncio.to_thread(faces.enroll, name.strip(), str(path), append)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
     finally:
         path.unlink(missing_ok=True)
+
+
+@app.post("/api/faces/recognize-burst")
+async def recognize_face_burst(images: list[UploadFile] = File(...), session_id: str | None = Form(None),
+                               identity_revision: int | None = Form(None)):
+    """多帧投票识别（3 帧至少 2 帧一致才认定），协议与 /api/faces/recognize 一致。"""
+    if not 1 <= len(images) <= 5:
+        raise HTTPException(422, '请提交 1-5 帧画面')
+    if session_id:
+        check_identity(session_id, identity_revision)
+        if agent.lock(session_id).locked():
+            raise HTTPException(409, '请先结束当前回答，再识别成员')
+    paths = [await face_image(im) for im in images]
+    try:
+        before = check_identity(session_id, identity_revision)['revision'] if session_id else None
+        result = await asyncio.to_thread(faces.recognize_burst, [str(p) for p in paths])
+        if session_id:
+            found = result['faces']
+            person_id = found[0].get('person_id') if len(found) == 1 else None
+            result['identity'] = select_speaker(session_id, person_id, before, 'face')
+            result['needs_selection'] = person_id is None
+            result['message'] = (
+                f"认出你了，{result['identity']['person']['name']}（{result.get('matched_frames', 1)}/{result.get('frames', 1)} 帧一致）。现在可以继续聊天。"
+                if person_id else
+                f"还不能确认你是谁（{result.get('matched_frames', 0)}/{result.get('frames', 0)} 帧一致），请选择成员、重新录入或继续访客聊天。")
+        return result
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    finally:
+        for p in paths:
+            p.unlink(missing_ok=True)
+
+
+@app.get("/api/faces/recog-stats")
+async def face_recog_stats(days: int = 7):
+    """识别距离分布统计（E：阈值数据驱动）。仅本机使用，不做鉴权隔离。"""
+    return faces.stats(days)
 
 
 @app.post("/api/faces/recognize")

@@ -9,6 +9,10 @@ class Settings(BaseSettings):
     timezone: str = "Asia/Shanghai"
     face_threshold: float = 0.48
     lbph_threshold: float = 75.0
+    # 人脸增量学习与样本池（2026-11-13）
+    face_learn: bool = True
+    face_learn_threshold: float = 0.40
+    face_max_samples: int = 8
     llm_api_key: str | None = None
     llm_base_url: str = "https://maas.qianwenaiapi.com/compatible-mode/v1"
     llm_model: str = "qwen3.8-flash"

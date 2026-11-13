@@ -130,7 +130,10 @@ class IdentityTests(unittest.TestCase):
         saved=FaceService()._save('小林',b'new-private-face-feature')
         self.assertEqual(saved['id'],self.a['id'])
         r=self.client.get('/api/people')
-        self.assertEqual(r.json(),[self.a,self.b]);self.assertNotIn('feature',r.text)
+        people=r.json()
+        self.assertEqual([{k:p[k] for k in ('id','name')} for p in people],[self.a,self.b])
+        self.assertTrue(all('samples' in p for p in people))  # 2026-11-13: 新增样本数字段
+        self.assertNotIn('feature',r.text)
 
     def test_clear_only_current_member_and_legacy_guest_migration(self):
         with db.connection() as c:c.execute('INSERT INTO agent_sessions VALUES (?,?,?)',('legacy-browser','old-session',1))
