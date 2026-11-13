@@ -229,43 +229,6 @@ class ReconcileTests(StudyCase):
         self.assertEqual(study.get_session(sid)['status'], 'paused')
 
 
-class SpeechQueueTests(StudyCase):
-    def test_spoken_and_dedup(self):
-        q = study.SpeechQueue()
-        q.add('休息吧'); q.add('休息吧')
-        self.assertEqual(len(q), 1)
-        said = []
-        out = q.drain(lambda t: said.append(t) or 'spoken')
-        self.assertEqual(out, [('休息吧', 'spoken')])
-        self.assertEqual(len(q), 0)
-
-    def test_failed_retried_then_spoken(self):
-        q = study.SpeechQueue()
-        q.add('休息吧')
-        def fail(t): raise RuntimeError('afplay died')
-        out = q.drain(fail)
-        self.assertEqual(out, [('休息吧', 'failed')])
-        self.assertEqual(len(q), 1)
-        out2 = q.drain(lambda t: 'spoken')
-        self.assertEqual(out2, [('休息吧', 'spoken')])
-        self.assertEqual(len(q), 0)
-
-    def test_stale_dropped(self):
-        from datetime import datetime as dt
-        q = study.SpeechQueue(max_age_seconds=120)
-        t0 = dt.now().astimezone()
-        q.add('休息吧', t0)
-        out = q.drain(lambda t: 'spoken', t0 + timedelta(minutes=5))
-        self.assertEqual(out, [('休息吧', 'stale')])
-        self.assertEqual(len(q), 0)
-
-    def test_text_only_counts_failed(self):
-        q = study.SpeechQueue()
-        q.add('x')
-        out = q.drain(lambda t: 'text-only')  # 无 afplay 的环境
-        self.assertEqual(out, [('x', 'failed')])
-
-
 class ReviewFixTests(StudyCase):
     """2026-11-13 产品逻辑 review 修复的回归测试。"""
 

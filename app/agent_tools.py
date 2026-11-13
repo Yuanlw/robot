@@ -44,6 +44,9 @@ TOOLS = [
     schema('study_rate', '用户自评本次学习质量时调用，如"今天学得不错"。', {
         'score': {'type': 'integer', 'minimum': 1, 'maximum': 10, 'description': '10为最佳'},
         'tags': {'type': 'array', 'items': {'type': 'string'}, 'description': '场景标签，如["晚上","有点吵"]'}}, ['score']),
+    schema('dnd_set', '设置勿扰模式：机器人暂停主动说话（到点提醒延后）。用户说"安静一会/别打扰我/闭嘴N分钟"时调用。', {
+        'minutes': {'type': 'integer', 'description': '勿扰分钟数，默认60，上限480'}}, []),
+    schema('dnd_cancel', '解除勿扰模式。用户说"解除勿扰/可以说话了"时调用。'),
 ]
 
 
@@ -112,6 +115,17 @@ def execute(name, args, context):
             raise ValueError('提醒不存在或已经送达/取消')
         return {'cancelled': True, 'reminder_id': args['reminder_id']}
     
+    # 勿扰模式（不依赖学习模式开关；文件式状态，主服务语音通道即刻生效）
+    if name == 'dnd_set':
+        from . import speech as _speech
+        minutes = args.get('minutes') or 60
+        until = _speech.set_dnd(minutes)
+        return {'ok': True, 'message': f'好的，{minutes} 分钟内我不主动说话，到点的提醒会延后。', 'until': until}
+    if name == 'dnd_cancel':
+        from . import speech as _speech
+        _speech.clear_dnd()
+        return {'ok': True, 'message': '勿扰已解除，我恢复正常。'}
+
     # 学习陪伴工具
     if not settings.study_enabled:
         raise ValueError('学习陪伴功能未启用')

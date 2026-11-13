@@ -23,6 +23,7 @@ TOOL_LABELS = {
     'study_resume': '正在恢复学习', 'study_end': '正在结束学习',
     'study_review': '正在整理学习报告', 'study_suggest': '正在查看学习建议',
     'study_rate': '正在记录自评',
+    'dnd_set': '正在开启勿扰', 'dnd_cancel': '正在解除勿扰',
 }
 
 

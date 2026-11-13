@@ -2,10 +2,9 @@
 
 第 0 期：计时 + 主动提醒。
 第 1 期：会话时长持久化、延长语义、自评质量、周期统计快照（study_analytics）。
-验证期修复（2026-11-13）：僵尸会话自动收口（reconcile_sessions）、
-播报送达契约（SpeechQueue：失败重试、过期作废，对齐家庭提醒的交付语义）。
+验证期修复（2026-11-13）：僵尸会话自动收口（reconcile_sessions）。
+播报送达契约已上移至 app/speech.py 统一语音通道（SpeechChannel）。
 """
-import threading
 from datetime import datetime, timedelta
 from .db import connection, now_iso
 
@@ -502,47 +501,6 @@ def reconcile_sessions(now: datetime = None, max_age_hours: float = 6,
     return actions
 
 
-class SpeechQueue:
-    """主动播报队列（送达契约）：失败留在队列重试，超过保鲜期作废。
-
-    与家庭提醒同一语义：说出去才算数；机器睡眠唤醒后不补播陈旧内容。
-    """
-
-    def __init__(self, max_age_seconds: int = 120):
-        self.max_age = max_age_seconds
-        self._items: list[tuple[str, datetime]] = []
-        self._lock = threading.Lock()
-
-    def __len__(self):
-        with self._lock:
-            return len(self._items)
-
-    def add(self, text: str, now: datetime = None):
-        now = now or datetime.now().astimezone()
-        with self._lock:
-            if any(t == text for t, _ in self._items):
-                return
-            self._items.append((text, now))
-
-    def drain(self, speak_fn, now: datetime = None) -> list[tuple]:
-        """逐条播报。返回 [(text, 'spoken'|'stale'|'failed')]；failed 回队等待重试。"""
-        now = now or datetime.now().astimezone()
-        with self._lock:
-            pending, self._items = self._items, []
-        results = []
-        for text, queued_at in pending:
-            if (now - queued_at).total_seconds() > self.max_age:
-                results.append((text, 'stale'))
-                continue
-            try:
-                ok = speak_fn(text) == 'spoken'
-            except Exception:
-                ok = False
-            results.append((text, 'spoken' if ok else 'failed'))
-            if not ok:
-                with self._lock:
-                    self._items.append((text, queued_at))
-        return results
 
 
 def get_rateable_session(person_id: int, window_minutes: int = 30, now: datetime = None) -> dict | None:

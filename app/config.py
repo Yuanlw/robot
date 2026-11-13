@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     vision_sample_seconds: int = 5
     vision_max_bytes: int = 2 * 1024 * 1024
 
+    # 统一语音通道（2026-11-13）：安静时段只约束机器人自主播报，显式提醒照响
+    quiet_start_hour: int = 22
+    quiet_end_hour: int = 7
+    dnd_default_minutes: int = 60
+
     model_config = SettingsConfigDict(env_prefix="ROBOT_", env_file=".env")
 
 

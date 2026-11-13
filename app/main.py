@@ -25,13 +25,17 @@ from .harness import agent
 from . import agent_store, bailian, identity, study, study_profiler
 from . import study_report
 from . import vision as vision_mod
+from . import speech
 from .csrf import CSRFMiddleware
 
 faces = FaceService()
 voice = VoiceService()
 llm = LLMService()
 vision = vision_mod.VisionService()
-study_speech = study.SpeechQueue(max_age_seconds=120)
+speech_channel = speech.SpeechChannel(
+    lambda text: voice.speak(text),
+    quiet_start=settings.quiet_start_hour, quiet_end=settings.quiet_end_hour,
+    on_event=lambda ev: record_event(ev.pop('type'), ev))
 conversation_histories: dict[str, dict[str, object]] = {}
 conversation_lock = threading.Lock()
 RECENT_CONVERSATION_MESSAGES = 8
@@ -39,31 +43,42 @@ MAX_CONVERSATION_MESSAGES = 20
 
 
 async def reminder_loop():
+    last_suppressed: dict = {}
     while True:
         try:
             reminders = due_now()
         except Exception:
             reminders = []
         for reminder in reminders:
+            rid = reminder["id"]
             try:
                 person = f"{reminder['person_name']}，" if reminder.get("person_name") else ""
                 spoken = f"{person}提醒时间到了：{reminder['text']}"
-                result = await asyncio.to_thread(voice.speak, spoken)
-                if result != "spoken":
-                    raise RuntimeError("提醒未播放，保留待提醒状态。")
-                mark_delivered(reminder["id"])
-                record_event("reminder_delivered", {"reminder_id": reminder["id"], "text": spoken, "voice": result})
-            except Exception:
-                record_event("reminder_error", {"reminder_id": reminder["id"], "error": "播放失败，将重试。"})
+                # 统一语音通道：只有真播出去（delivered）才标送达；
+                # 静音/勿扰返回回执但不标——提醒保持 active，15s 循环自然延后重试。
+                result = await asyncio.to_thread(speech_channel.submit, spoken,
+                                                 speech.PRIORITY_REMINDER, None, True, 180)
+                if result == "delivered":
+                    last_suppressed.pop(rid, None)
+                    mark_delivered(rid)
+                    record_event("reminder_delivered", {"reminder_id": rid, "text": spoken})
+                elif result in ("muted", "deferred_dnd"):
+                    if last_suppressed.get(rid) != result:  # 状态变化才记录，防 15s 刷屏
+                        last_suppressed[rid] = result
+                        record_event("reminder_suppressed", {"reminder_id": rid, "reason": result})
+                else:
+                    raise RuntimeError(f"提醒未播放（{result}），保留待提醒状态。")
+            except Exception as exc:
+                record_event("reminder_error", {"reminder_id": rid, "error": str(exc)[:120]})
         await asyncio.sleep(15)
 
 
 async def study_loop():
-    """学习陪伴循环（验证期 2026-11-13：频繁+精准优先）。
+    """学习陪伴循环（统一语音通道版 2026-11-13）。
 
     每 30 秒：① 会话健康收口（超龄/闲置自动结束，视觉断连暂停、恢复续跑）
-    ② 播报队列 drain（失败重试、超 2 分钟作废，睡眠唤醒不补播陈旧话术）
-    ③ 定时提醒入队（自适应阈值 + 柔性提醒）。8 点前安静时段不播报。
+    ② 定时提醒判定 → 提交通道（勿扰/安静时段/静音由通道策略层统一处理，
+    新鲜期 120 秒——睡眠唤醒后不补播陈旧话术）。
     """
     if not settings.study_enabled:
         return
@@ -75,29 +90,27 @@ async def study_loop():
                 vision_mod.judge.reset(pid)
                 record_event("study_auto", {"session_id": sid, "action": action, "reason": reason})
 
-            if now.hour >= 8:
-                for text, status in await asyncio.to_thread(study_speech.drain, voice.speak, now):
-                    record_event("study_speech", {"status": status, "text": text[:60]})
+            def resolver(person_id):
+                try:
+                    return study_profiler.thresholds_for_reminder(person_id)
+                except Exception:
+                    return None
 
-                def resolver(person_id):
-                    try:
-                        return study_profiler.thresholds_for_reminder(person_id)
-                    except Exception:
-                        return None
-
-                needs = study.sessions_needing_reminder(
-                    settings.study_focus_minutes, settings.study_break_minutes, threshold_resolver=resolver)
-                for item in needs:
-                    sess = item['session']
-                    reminder_type = item['type']
-                    spoken = item['spoken']
-                    if reminder_type == 'break_time':
-                        study.pause_session(sess['id'])
-                    elif reminder_type == 'resume_time':
-                        study.resume_session(sess['id'])
-                    study_speech.add(spoken, now)
-                    study.record_reminder(sess['id'], reminder_type, str(item['elapsed']['phase_elapsed_seconds'] // 60))
-                    record_event("study_reminder", {"session_id": sess['id'], "type": reminder_type, "text": spoken})
+            needs = study.sessions_needing_reminder(
+                settings.study_focus_minutes, settings.study_break_minutes, threshold_resolver=resolver)
+            for item in needs:
+                sess = item['session']
+                reminder_type = item['type']
+                spoken = item['spoken']
+                if reminder_type == 'break_time':
+                    study.pause_session(sess['id'])
+                elif reminder_type == 'resume_time':
+                    study.resume_session(sess['id'])
+                prio = speech.PRIORITY_GENTLE if reminder_type == 'gentle' else speech.PRIORITY_STUDY
+                res = speech_channel.submit(spoken, prio, fresh_seconds=120)
+                study.record_reminder(sess['id'], reminder_type, str(item['elapsed']['phase_elapsed_seconds'] // 60))
+                record_event("study_reminder", {"session_id": sess['id'], "type": reminder_type,
+                                                "text": spoken, "speech": res})
 
         except Exception as e:
             record_event("study_loop_error", {"error": str(e)})
@@ -112,6 +125,7 @@ async def lifespan(_app: FastAPI):
     vision_mod.init_vision_db()
     faces.init_face_db()
     await asyncio.to_thread(voice.warmup)
+    speech_channel.start()
     reminder_task = asyncio.create_task(reminder_loop())
     study_task = asyncio.create_task(study_loop())
     try:
@@ -120,6 +134,7 @@ async def lifespan(_app: FastAPI):
         reminder_task.cancel()
         study_task.cancel()
         await asyncio.gather(reminder_task, study_task, return_exceptions=True)
+        speech_channel.stop()
         await agent.shutdown()
 
 
@@ -413,7 +428,7 @@ async def recognize_face(image: UploadFile = File(...), session_id: str | None =
 
 @app.post("/api/speak")
 def speak(text: str):
-    return {"text": text, "status": voice.speak(text)}
+    return {"text": text, "status": speech_channel.submit(text, speech.PRIORITY_RESPONSE, wait=True, timeout=60)}
 
 
 @app.post("/api/stt")
@@ -866,14 +881,42 @@ async def vision_frame(image: UploadFile = File(...), session_id: str = Query(mi
     vision_mod.log_frame(sess['id'], person['id'], present, metrics, issues,
                          action['warnings'], warning_text, quality='multi' if multi else None)
     if speak_texts:
-        try:
-            await asyncio.to_thread(voice.speak, warning_text)
-            record_event("vision_warning", {"person_id": person['id'], "text": warning_text})
-        except Exception as exc:  # 播报失败不影响守护与状态流转，只记录
-            record_event("vision_warning_failed", {"person_id": person['id'], "error": str(exc)[:120]})
+        # 姿态警告走统一通道（P3）；到离座/多人/校准类状态播报优先级更高（P2）
+        prio = (speech.PRIORITY_STUDY
+                if (action['left'] or action['returned'] or action.get('multi_notice') or action.get('suspect_new'))
+                else speech.PRIORITY_POSTURE)
+        res = speech_channel.submit(warning_text, prio, fresh_seconds=60)
+        record_event("vision_warning", {"person_id": person['id'], "text": warning_text, "speech": res})
     return {"present": present, "quality_ok": quality_ok, "multi": multi,
             "person_count": person_count, "issues": issues,
             "severe": [i for i, s in severities.items() if s == 'severe'],
             "warnings": speak_texts, "paused": action['left'], "resumed": action['returned'],
             "suppressed": action.get('suppressed'), "stats": action.get('stats'),
             "calibrated": baseline is not None}
+
+
+# ===== 统一语音通道 API（2026-11-13 第一批） =====
+
+class DndIn(BaseModel):
+    minutes: int | None = Field(default=None, ge=1, le=480)
+
+
+@app.get("/api/speech/status")
+async def speech_status():
+    """勿扰/安静时段/静音/队列/最近被压制的话——前端横幅数据源。"""
+    return speech_channel.status()
+
+
+@app.post("/api/speech/dnd")
+async def speech_dnd_on(payload: DndIn | None = None):
+    minutes = (payload.minutes if payload and payload.minutes else settings.dnd_default_minutes)
+    until = speech.set_dnd(minutes)
+    record_event("dnd_set", {"minutes": minutes, "until": until})
+    return speech_channel.status()
+
+
+@app.delete("/api/speech/dnd")
+async def speech_dnd_off():
+    speech.clear_dnd()
+    record_event("dnd_cleared", {})
+    return speech_channel.status()
