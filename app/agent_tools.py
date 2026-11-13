@@ -168,9 +168,9 @@ def execute(name, args, context):
         return study_profiler.suggest(person_id)
 
     if name == 'study_rate':
-        session = study.get_current_session(person_id)
+        session = study.get_rateable_session(person_id)
         if not session:
-            raise ValueError('当前没有进行中的学习会话')
+            raise ValueError('没有可评分的学习会话（进行中或刚结束30分钟内）')
         study.rate_session(session['id'], args['score'], args.get('tags') or [])
         return {'ok': True, 'message': '记下来了，谢谢自评！'}
 

@@ -101,4 +101,12 @@ def delete_person(person_id):
             # 每个浏览器独立 guest_key，避免被删成员的不同浏览器共享同一个访客会话
             c.execute("UPDATE speaker_bindings SET person_id=NULL,guest_key=?,revision=revision+1,source='guest' WHERE browser_id=?",
                       ('guest:' + uuid.uuid4().hex, binding['browser_id']))
-        return harness_id
+    # 结束该成员进行中的学习会话（放在事务外：end_session 自带连接，避免 sqlite 写锁嵌套）
+    try:
+        from . import study as _study
+        _sess = _study.get_current_session(person_id)
+        if _sess:
+            _study.end_session(_sess['id'], reason='成员删除')
+    except Exception:
+        pass
+    return harness_id

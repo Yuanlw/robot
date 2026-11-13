@@ -21,6 +21,8 @@ class StudyCase(unittest.TestCase):
         init_db()
         study.init_study_db()
         vision_module.init_vision_db()
+        from app import agent_store
+        agent_store.init_agent_db()
 
     def make_session(self, person_id, started, status='active', study_seconds=0, break_seconds=0):
         with connection() as c:
@@ -262,3 +264,72 @@ class SpeechQueueTests(StudyCase):
         q.add('x')
         out = q.drain(lambda t: 'text-only')  # 无 afplay 的环境
         self.assertEqual(out, [('x', 'failed')])
+
+
+class ReviewFixTests(StudyCase):
+    """2026-11-13 产品逻辑 review 修复的回归测试。"""
+
+    def _add_person(self, pid, name):
+        with connection() as c:
+            c.execute("INSERT OR IGNORE INTO people(id,name,created_at) VALUES(?,?,?)",
+                      (pid, name, '2026-01-01T00:00:00+08:00'))
+
+    def _metrics(self):
+        return {'head_roll': 2.0, 'shoulder_roll': 1.0, 'shoulder_width': 0.3, 'head_drop': 0.25}
+
+    def test_auto_paused_session_gets_no_resume_reminder(self):
+        # P0 回归：视觉断连暂停的会话，绝不能被 resume_time 提醒唤醒（否则每5分钟死循环播报）
+        from app import vision as vision_module
+        now = datetime.now().astimezone()
+        sid = self.make_session(1, now - timedelta(minutes=50))
+        vision_module.log_frame(sid, 1, True, self._metrics(), [], [], None)
+        with connection() as c:
+            c.execute("UPDATE study_vision_events SET created_at=?", ((now - timedelta(minutes=20)).isoformat(),))
+        actions = study.reconcile_sessions(now)
+        self.assertEqual([a[2] for a in actions], ['auto_pause'])
+        # 休息早已"超时"，但 auto_pause 会话不参与定时提醒
+        self.assertEqual(study.sessions_needing_reminder(40, 5, now=now + timedelta(minutes=10)), [])
+        # 帧恢复后仍能由 reconcile 续跑
+        vision_module.log_frame(sid, 1, True, self._metrics(), [], [], None)
+        actions = study.reconcile_sessions(datetime.now().astimezone())
+        self.assertEqual([a[2] for a in actions], ['auto_resume'])
+
+    def test_manual_guardian_off_not_auto_paused(self):
+        from app import vision as vision_module
+        now = datetime.now().astimezone()
+        sid = self.make_session(1, now - timedelta(minutes=30))
+        vision_module.log_frame(sid, 1, True, self._metrics(), [], [], None)
+        with connection() as c:
+            c.execute("UPDATE study_vision_events SET created_at=?", ((now - timedelta(minutes=15)).isoformat(),))
+        study.mark_vision_toggle(1, False)  # 孩子手动关掉守护 ≠ 离座
+        self.assertEqual(study.reconcile_sessions(now), [])
+        self.assertEqual(study.get_session(sid)['status'], 'active')
+
+    def test_rateable_window(self):
+        sess = study.start_session(1)
+        study.end_session(sess['id'])
+        self.assertIsNotNone(study.get_rateable_session(1))  # 刚结束可评分
+        with connection() as c:
+            c.execute("UPDATE study_sessions SET ended_at=?",
+                      ((datetime.now().astimezone() - timedelta(hours=2)).isoformat(),))
+        self.assertIsNone(study.get_rateable_session(1))    # 2小时前结束的不行
+
+    def test_spoken_includes_person_name(self):
+        self._add_person(1, '袁玥')
+        now = datetime.now().astimezone()
+        self.make_session(1, now - timedelta(minutes=45))
+        needs = study.sessions_needing_reminder(40, 5, now=now)
+        self.assertIn('袁玥', needs[0]['spoken'])
+
+    def test_delete_person_ends_study_session(self):
+        from app import identity as identity_mod
+        self._add_person(7, '测试娃')
+        study.start_session(7)
+        identity_mod.delete_person(7)
+        self.assertIsNone(study.get_current_session(7))
+        with connection() as c:
+            status = c.execute("SELECT status FROM study_sessions WHERE person_id=7").fetchone()[0]
+            sid = c.execute("SELECT id FROM study_sessions WHERE person_id=7").fetchone()[0]
+            reason = c.execute("SELECT event_data FROM study_events WHERE session_id=? AND event_type='end' ORDER BY id DESC LIMIT 1", (sid,)).fetchone()[0]
+        self.assertEqual(status, 'completed')
+        self.assertIn('成员删除', reason)

@@ -693,10 +693,30 @@ async def study_rate(payload: StudyRateIn):
     speaker = check_identity(payload.session_id, payload.identity_revision)
     if not speaker['person']:
         raise HTTPException(400, "需要先选择身份")
-    sess = study.get_current_session(speaker['person']['id'])
+    sess = study.get_rateable_session(speaker['person']['id'])
     if not sess:
-        raise HTTPException(400, "当前没有进行中的学习会话")
+        raise HTTPException(400, "没有可评分的学习会话（进行中或刚结束30分钟内）")
     return study.rate_session(sess['id'], payload.score, payload.tags)
+
+
+@app.post("/api/vision/start")
+async def vision_start(session_id: str, identity_revision: int | None = None):
+    """守护开启标记：手动开守护后，帧断流不再被当成'意外断连'。"""
+    if not settings.vision_enabled:
+        raise HTTPException(503, "坐姿守护未启用")
+    person = _vision_person(session_id, identity_revision)
+    study.mark_vision_toggle(person['id'], True)
+    return {"ok": True}
+
+
+@app.post("/api/vision/stop")
+async def vision_stop(session_id: str, identity_revision: int | None = None):
+    """守护关闭标记：孩子主动关守护 ≠ 离座，会话不应被自动暂停。"""
+    if not settings.vision_enabled:
+        raise HTTPException(503, "坐姿守护未启用")
+    person = _vision_person(session_id, identity_revision)
+    study.mark_vision_toggle(person['id'], False)
+    return {"ok": True}
 
 
 # ===== 坐姿守护 API（第二期 2A：帧仅内存分析，不落盘不上传） =====
@@ -774,7 +794,8 @@ async def vision_frame(image: UploadFile = File(...), session_id: str = Query(mi
         data = None
     issues = vision_mod.check_issues(metrics, baseline) if metrics else []
     action = vision_mod.tracker.record(person['id'], issues, present)
-    speak_texts = [vision_mod.WARNING_TEXT[i] for i in action['warnings'][:1]]
+    prefix = f"{person['name']}，" if person.get('name') else ''
+    speak_texts = [prefix + vision_mod.WARNING_TEXT[i] for i in action['warnings'][:1]]
     if action['left']:
         if sess['status'] == 'active':
             study.pause_session(sess['id'])

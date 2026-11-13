@@ -291,17 +291,29 @@ def sessions_needing_reminder(focus_minutes: int, break_minutes: int,
     threshold_resolver(person_id) -> {'focus_minutes','break_minutes','extend_prone'}；
     不提供时用固定参数（第 0 期行为）。延长语义：'再给我N分钟'把到点时间推为
     请求时刻+N分钟，而不是修改阈值——到期后若再次延长，再向后推。
+
+    跳过最新事件为 auto_pause 的会话（视觉断连暂停）：这类会话只能由
+    reconcile_sessions 的"帧恢复"路径续跑，否则会和 resume_time 提醒形成
+    每 5 分钟一次的暂停/唤醒死循环（2026-11-13 review 发现的 P0）。
     """
     now = now or datetime.now().astimezone()
     with connection() as c:
-        sessions = c.execute(
-            "SELECT * FROM study_sessions WHERE status IN ('active','paused')"
-        ).fetchall()
+        sessions = [dict(r) for r in c.execute(
+            "SELECT s.*, p.name AS person_name FROM study_sessions s "
+            "LEFT JOIN people p ON p.id=s.person_id WHERE s.status IN ('active','paused')"
+        ).fetchall()]
 
     result = []
-    for row in sessions:
-        sess = dict(row)
+    for sess in sessions:
+        with connection() as c:
+            last_evt = c.execute(
+                "SELECT event_type FROM study_events WHERE session_id=? ORDER BY id DESC LIMIT 1",
+                (sess['id'],)).fetchone()
+        if last_evt and last_evt[0] == 'auto_pause':
+            continue  # 视觉断连暂停中：等帧恢复，不参与定时提醒
         pid = sess['person_id']
+        name = sess.get('person_name') or ''
+        prefix = f"{name}，" if name else ''
         limits = {'focus_minutes': focus_minutes, 'break_minutes': break_minutes, 'extend_prone': False}
         if threshold_resolver:
             try:
@@ -326,15 +338,15 @@ def sessions_needing_reminder(focus_minutes: int, break_minutes: int,
                 due = extended_due
 
         if now >= due:
-            spoken = (f"学了 {base_minutes} 分钟了，起来活动 {limits['break_minutes']} 分钟吧。"
-                      if phase == 'study' else "休息够了，继续加油吧！")
+            spoken = (f"{prefix}学了 {base_minutes} 分钟了，起来活动 {limits['break_minutes']} 分钟吧。"
+                      if phase == 'study' else f"{prefix}休息够了，继续加油吧！")
             result.append({'session': sess, 'type': 'break_time' if phase == 'study' else 'resume_time',
                            'elapsed': elapsed, 'spoken': spoken})
         elif phase == 'study' and limits['extend_prone'] and not _gentled_after(sess, phase_start):
             gentle_at = due - timedelta(minutes=5)
             if now >= gentle_at:
                 minutes_left = max(1, int((due - now).total_seconds() // 60) + 1)
-                spoken = f"还有大约 {minutes_left} 分钟到休息时间，要继续还是先休息？"
+                spoken = f"{prefix}还有大约 {minutes_left} 分钟到休息时间，要继续还是先休息？"
                 result.append({'session': sess, 'type': 'gentle', 'elapsed': elapsed, 'spoken': spoken})
 
     return result
@@ -473,7 +485,7 @@ def reconcile_sessions(now: datetime = None, max_age_hours: float = 6,
             end_session(sid, reason='长时间无活动')
             actions.append((sid, pid, 'end', '长时间无活动'))
             continue
-        if sess['status'] == 'active' and frame_count and last_frame:
+        if sess['status'] == 'active' and frame_count and last_frame and not (last_evt and last_evt[0] == 'vision_off'):
             if (now - datetime.fromisoformat(last_frame)).total_seconds() > vision_stale_minutes * 60:
                 pause_session(sid)
                 with connection() as c:
@@ -531,3 +543,32 @@ class SpeechQueue:
                 with self._lock:
                     self._items.append((text, queued_at))
         return results
+
+
+def get_rateable_session(person_id: int, window_minutes: int = 30, now: datetime = None) -> dict | None:
+    """评分目标会话：进行中的优先；否则取 window_minutes 内刚结束的会话。
+
+    产品逻辑：自评最自然的时机是"刚学完"，不能只允许进行中评分（2026-11-13 review）。
+    """
+    sess = get_current_session(person_id)
+    if sess:
+        return sess
+    now = now or datetime.now().astimezone()
+    with connection() as c:
+        row = c.execute(
+            "SELECT * FROM study_sessions WHERE person_id=? AND status='completed' AND ended_at IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1", (person_id,)).fetchone()
+    if row and (now - datetime.fromisoformat(row['ended_at'])).total_seconds() <= window_minutes * 60:
+        return dict(row)
+    return None
+
+
+def mark_vision_toggle(person_id: int, on: bool):
+    """记录守护开/关标记：手动关闭不应被 reconcile 当成'视觉断连'暂停。"""
+    sess = get_current_session(person_id)
+    if not sess:
+        return
+    with connection() as c:
+        c.execute(
+            "INSERT INTO study_events(session_id,event_type,event_data,created_at) VALUES(?,?,?,?)",
+            (sess['id'], 'vision_on' if on else 'vision_off', None, now_iso()))
