@@ -369,7 +369,9 @@ async def recognize_face_burst(images: list[UploadFile] = File(...), session_id:
             result['message'] = (
                 f"认出你了，{result['identity']['person']['name']}（{result.get('matched_frames', 1)}/{result.get('frames', 1)} 帧一致）。现在可以继续聊天。"
                 if person_id else
-                f"还不能确认你是谁（{result.get('matched_frames', 0)}/{result.get('frames', 0)} 帧一致），请选择成员、重新录入或继续访客聊天。")
+                ("画面里有多个人，请单独正对摄像头识别，或手动选择成员。"
+                 if result.get('multi_face_frames') else
+                 f"还不能确认你是谁（{result.get('matched_frames', 0)}/{result.get('frames', 0)} 帧一致），请选择成员、重新录入或继续访客聊天。"))
         return result
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -799,11 +801,13 @@ async def vision_calibrate(image: UploadFile = File(...), session_id: str = Quer
     person = _vision_person(session_id, identity_revision)
     data = await _vision_image(image)
     try:
-        metrics, present, quality_ok = await asyncio.to_thread(vision.analyze_bytes, data)
+        metrics, present, quality_ok, person_count = await asyncio.to_thread(vision.analyze_bytes, data)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     finally:
         data = None  # 帧立即释放
+    if person_count >= 2:
+        raise HTTPException(422, "画面里有多个人，请单独正对摄像头校准")
     if not present or not metrics or not quality_ok:
         raise HTTPException(422, "没有看清你（需要正对摄像头、光线充足、头肩完整入镜），请调整后重试")
     gate_error = vision_mod.validate_calibration(metrics)
@@ -830,16 +834,19 @@ async def vision_frame(image: UploadFile = File(...), session_id: str = Query(mi
     baseline = vision_mod.get_baseline(person['id'])
     data = await _vision_image(image)
     try:
-        metrics, present, quality_ok = await asyncio.to_thread(vision.analyze_bytes, data)
+        metrics, present, quality_ok, person_count = await asyncio.to_thread(vision.analyze_bytes, data)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     finally:
         data = None
-    severities = vision_mod.issue_severities(metrics, baseline) if metrics else {}
+    multi = person_count >= 2
+    severities = vision_mod.issue_severities(metrics, baseline) if (metrics and not multi) else {}
     issues = list(severities)
-    action = vision_mod.judge.record(person['id'], sess['id'], severities, present, quality_ok)
+    action = vision_mod.judge.record(person['id'], sess['id'], severities, present, quality_ok, multi=multi)
     prefix = f"{person['name']}，" if person.get('name') else ''
     speak_texts = [prefix + vision_mod.WARNING_TEXT[i] for i in action['warnings'][:1]]
+    if action.get('multi_notice'):
+        speak_texts.append("画面里好像有好几个人，我认不准是谁在学习——坐姿提醒先暂停，请单独坐在摄像头前。")
     if action.get('suspect_new'):
         speak_texts.append("我可能看错了你的坐姿，请在页面上重新校准一下。")
         record_event("vision_suspect_calibration", {"person_id": person['id'], "stats": action['stats']})
@@ -853,18 +860,19 @@ async def vision_frame(image: UploadFile = File(...), session_id: str = Query(mi
             study.resume_session(sess['id'])
         speak_texts.append("欢迎回来，计时继续。")
     warning_text = " ".join(speak_texts) if speak_texts else None
-    # 之前提醒过的问题本轮消失：3 分钟窗口内记为已响应
-    if present and metrics:
+    # 之前提醒过的问题本轮消失：3 分钟窗口内记为已响应（多人帧归属不明，不参与）
+    if present and metrics and not multi:
         vision_mod.mark_responded(person['id'], [k for k in vision_mod.WARNING_TEXT if k not in issues])
     vision_mod.log_frame(sess['id'], person['id'], present, metrics, issues,
-                         action['warnings'], warning_text)
+                         action['warnings'], warning_text, quality='multi' if multi else None)
     if speak_texts:
         try:
             await asyncio.to_thread(voice.speak, warning_text)
             record_event("vision_warning", {"person_id": person['id'], "text": warning_text})
         except Exception as exc:  # 播报失败不影响守护与状态流转，只记录
             record_event("vision_warning_failed", {"person_id": person['id'], "error": str(exc)[:120]})
-    return {"present": present, "quality_ok": quality_ok, "issues": issues,
+    return {"present": present, "quality_ok": quality_ok, "multi": multi,
+            "person_count": person_count, "issues": issues,
             "severe": [i for i, s in severities.items() if s == 'severe'],
             "warnings": speak_texts, "paused": action['left'], "resumed": action['returned'],
             "suppressed": action.get('suppressed'), "stats": action.get('stats'),

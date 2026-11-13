@@ -63,8 +63,9 @@ def build_report(person_id: int, person_name: str, period: str = 'week') -> dict
 
     behavior = study_behavior.analyze_behavior_pattern(person_id, days=7 if period != 'month' else 30)
     if behavior['has_data']:
+        good_ratio = behavior['posture_good_ratio']
         lines += ["## 坐姿与专注", "",
-                  f"- 🪑 端正帧占比：**{int(behavior['posture_good_ratio'] * 100)}%**（共 {behavior['frames']} 帧采样）",
+                  f"- 🪑 端正帧占比：**{int(good_ratio * 100)}%**（共 {behavior['frames']} 帧采样）" if good_ratio is not None else f"- 🪑 端正帧占比：数据积累中（共 {behavior['frames']} 帧采样）",
                   f"- 🔔 坐姿提醒：**{behavior['warnings_sent']} 次**",
                   f"- ✅ 提醒后自己坐好：{'约 ' + str(int(behavior['warning_response_rate'] * 100)) + '%' if behavior['warning_response_rate'] is not None else '数据积累中'}",
                   f"- 🧘 常见提示：{'、'.join(behavior['common_issues'])}" if behavior['common_issues'] else "- 🧘 常见提示：暂无固定问题",

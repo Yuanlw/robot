@@ -218,3 +218,26 @@ class RecognizeTests(FaceServiceCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MultiFaceTests(FaceServiceCase):
+    def test_burst_rejects_multi_face_frames(self):
+        self.enroll_person('袁玥', '/p1.jpg', offset(0.0))
+        fake = FakeFR({'/f0.jpg': [np.array(offset(0.15))],                    # 单人命中
+                       '/f1.jpg': [np.array(offset(0.2)), np.array(offset(0.25))],  # 两张脸 → 废票
+                       '/f2.jpg': [np.array(offset(0.18))]})                   # 单人命中
+        with patch.object(FaceService, '_dlib', return_value=fake):
+            r = self.svc.recognize_burst(['/f0.jpg', '/f1.jpg', '/f2.jpg'])
+        self.assertEqual(r['multi_face_frames'], 1)
+        self.assertEqual(r['faces'][0]['name'], '袁玥')  # 2/3 有效票一致仍认定
+        self.assertEqual(r['matched_frames'], 2)
+
+    def test_burst_majority_multi_returns_unknown(self):
+        self.enroll_person('袁玥', '/p1.jpg', offset(0.0))
+        fake = FakeFR({'/f0.jpg': [np.array(offset(0.1)), np.array(offset(0.15))],
+                       '/f1.jpg': [np.array(offset(0.1)), np.array(offset(0.15))],
+                       '/f2.jpg': [np.array(offset(0.2))]})
+        with patch.object(FaceService, '_dlib', return_value=fake):
+            r = self.svc.recognize_burst(['/f0.jpg', '/f1.jpg', '/f2.jpg'])
+        self.assertEqual(r['multi_face_frames'], 2)
+        self.assertEqual(r['faces'], [])  # 有效票不足多数 → 宁可未知

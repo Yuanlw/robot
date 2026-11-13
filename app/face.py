@@ -324,10 +324,15 @@ class FaceService:
         return {"faces": results, "count": len(results), "backend": "opencv-lbph"}
 
     def recognize_burst(self, image_paths: list) -> dict:
-        """B 多帧投票识别：同一人连拍多帧，多数一致才认定。"""
+        """B 多帧投票识别：同一人连拍多帧，多数一致才认定。
+
+        多人严谨性（2026-11-13）：任何一帧检出 ≥2 张脸即整帧废票（不取"第一张脸"），
+        废票计入 multi_face_frames；有效票不足多数时宁可判未知，绝不猜是谁。
+        """
         dlib = self._dlib()
         frame_results = []  # [(pid|None, dist)] 投票用
         frame_info = []     # [(pid, name, dist, samples, enc)] 命中帧详情
+        multi_frames = 0
         if dlib:
             people = self._people()
             for path in image_paths:
@@ -336,6 +341,10 @@ class FaceService:
                     encodings = dlib.face_encodings(image)
                 except Exception:
                     encodings = []
+                if len(encodings) > 1:
+                    frame_results.append((None, None))
+                    multi_frames += 1
+                    continue
                 if not encodings:
                     frame_results.append((None, None))
                     continue
@@ -352,11 +361,12 @@ class FaceService:
                 self._maybe_learn(dlib, winner, dist, samples, enc)
                 self._log(winner, dist, 'dlib', frames=n, matched=matched, samples=len(samples))
                 return {"faces": [{"person_id": winner, "name": name, "distance": round(dist, 4)}],
-                        "count": 1, "backend": "dlib", "frames": n, "matched_frames": matched}
+                        "count": 1, "backend": "dlib", "frames": n, "matched_frames": matched,
+                        "multi_face_frames": multi_frames}
             best_dist = min((r[1] for r in frame_results if r[1] is not None), default=None)
             self._log(None, best_dist, 'dlib', frames=n, matched=matched)
             return {"faces": [], "count": 0, "backend": "dlib",
-                    "frames": n, "matched_frames": matched}
+                    "frames": n, "matched_frames": matched, "multi_face_frames": multi_frames}
 
         # LBPH 兜底：逐帧单张识别后投票（无增量学习）
         for path in image_paths:

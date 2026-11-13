@@ -13,6 +13,7 @@ import json
 import math
 import threading
 from datetime import datetime, timedelta
+from pathlib import Path
 from .db import connection, now_iso
 
 # MediaPipe Pose 33 点索引
@@ -35,6 +36,8 @@ SUSPECT_MIN_FRAMES = 20      # 占比判定所需最少高质量帧样本
 VISIBILITY_MIN = 0.6         # 关键点平均可见度低于此值的帧不参与任何判定
 ABSENT_PAUSE_FRAMES = 3      # 连续 N 帧无人 → 暂停计时
 PRESENT_RESUME_FRAMES = 2    # 暂停后连续 N 帧有人 → 恢复计时
+MULTI_STREAK_NOTICE = 2      # 连续 N 帧多人 → 语音说明一次"认不准是谁"
+MULTI_NOTICE_COOLDOWN_MIN = 10  # 多人说明的冷却（分钟）
 # 校准质量门槛：基线帧本身超过这些角度说明机位太歪或没坐正，拒绝入库
 CALIBRATE_HEAD_ROLL_MAX = 15.0
 CALIBRATE_SHOULDER_ROLL_MAX = 22.0
@@ -143,12 +146,33 @@ class PostureJudge:
         return st
 
     def record(self, person_id: int, session_id, severities: dict, present: bool,
-               quality_ok: bool, now: datetime = None) -> dict:
-        """返回 {'warnings':[标签], 'left', 'returned', 'suppressed', 'suspect_new', 'stats'}。"""
+               quality_ok: bool, now: datetime = None, multi: bool = False) -> dict:
+        """返回 {'warnings':[标签], 'left', 'returned', 'suppressed', 'suspect_new', 'multi_notice', 'stats'}。
+
+        multi=True（帧内 ≥2 人）：整帧冻结——不做姿态判定、不参与到/离座迁移、
+        不计入占比统计（归属不明的帧宁可不用）；连续 MULTI_STREAK_NOTICE 帧
+        触发一次语音说明，冷却 MULTI_NOTICE_COOLDOWN_MIN 分钟。
+        """
         now = now or datetime.now().astimezone()
         with self._lock:
             st = self._session_state(person_id, session_id)
             warnings, suppressed, suspect_new, nag_limited = [], None, False, False
+            stats = {'quality_frames': st['quality_frames'],
+                     'poor_frames': st['poor_frames'], 'suspect': st['suspect']}
+
+            if multi:
+                st['multi_streak'] = st.get('multi_streak', 0) + 1
+                multi_notice = False
+                last = st.get('last_multi_notice')
+                if st['multi_streak'] >= MULTI_STREAK_NOTICE and (
+                        last is None or (now - last).total_seconds() >= MULTI_NOTICE_COOLDOWN_MIN * 60):
+                    multi_notice = True
+                    st['last_multi_notice'] = now
+                return {'warnings': [], 'left': False, 'returned': False,
+                        'suppressed': 'multi_person', 'suspect_new': False,
+                        'multi_notice': multi_notice, 'stats': stats}
+            st['multi_streak'] = 0
+            multi_notice = False
 
             # 到/离座迁移
             absent = st.setdefault('_absent', {'streak': 0, 'paused': False, 'present_streak': 0})
@@ -206,6 +230,7 @@ class PostureJudge:
 
             return {'warnings': warnings, 'left': left, 'returned': returned,
                     'suppressed': suppressed, 'suspect_new': suspect_new,
+                    'multi_notice': False,
                     'stats': {'quality_frames': st['quality_frames'],
                               'poor_frames': st['poor_frames'], 'suspect': st['suspect']}}
 
@@ -253,8 +278,11 @@ def save_baseline(person_id: int, metrics: dict):
 
 
 def log_frame(session_id, person_id, present, metrics, issues, warning_labels,
-              warning_text) -> int:
-    """仅数值与标签入库；图像立即丢弃。返回事件 id（未入库返回 0）。"""
+              warning_text, quality: str = None) -> int:
+    """仅数值与标签入库；图像立即丢弃。返回事件 id（未入库返回 0）。
+
+    quality 可覆盖姿态质量标记（如多人帧记 'multi'，不参与 good/poor 统计）。
+    """
     with connection() as c:
         cur = c.execute(
             "INSERT INTO study_vision_events(session_id,person_id,created_at,present,head_roll,shoulder_roll,"
@@ -265,7 +293,7 @@ def log_frame(session_id, person_id, present, metrics, issues, warning_labels,
              metrics.get('shoulder_roll') if metrics else None,
              metrics.get('shoulder_width') if metrics else None,
              metrics.get('head_drop') if metrics else None,
-             'absent' if not present else ('poor' if issues else 'good'),
+             quality or ('absent' if not present else ('poor' if issues else 'good')),
              ','.join(issues) if issues else None,
              warning_text))
         return cur.lastrowid
@@ -286,6 +314,7 @@ def mark_responded(person_id: int, cleared_issues: list[str], now: datetime = No
 class VisionService:
     def __init__(self):
         self._pose = None
+        self._cascade = None
         self._error = None
 
     def available(self) -> bool:
@@ -305,11 +334,20 @@ class VisionService:
                                                 min_detection_confidence=0.5)
         return self._pose
 
-    def analyze_bytes(self, data: bytes) -> tuple[dict | None, bool, bool]:
-        """bytes(JPEG/PNG) → (metrics, present, quality_ok)。帧不落盘；异常抛出由调用方处理。
+    def _face_cascade(self):
+        if self._cascade is None:
+            import cv2
+            self._cascade = cv2.CascadeClassifier(
+                str(Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"))
+        return self._cascade
+
+    def analyze_bytes(self, data: bytes) -> tuple[dict | None, bool, bool, int]:
+        """bytes(JPEG/PNG) → (metrics, present, quality_ok, person_count)。帧不落盘。
 
         quality_ok：5 个关键点（鼻/双耳/双肩）平均可见度 ≥ VISIBILITY_MIN。
-        遮挡、侧身、画面残缺时 MediaPipe 仍会外推出地标，角度不可信——决策层第①级。
+        person_count：Haar 正脸计数（下限 1；侧脸/背身数不到——保守方向是少数，
+        数到 ≥2 即可确定多人）。MediaPipe Pose 只出一副骨架，多人时归属不明，
+        调用方必须据此冻结姿态判定（2026-11-13 多人场景 review）。
         """
         import cv2
         import numpy as np
@@ -320,9 +358,16 @@ class VisionService:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         result = self._model().process(rgb)
         if not result.pose_landmarks:
-            return None, False, False
+            return None, False, False, 0
         lms = result.pose_landmarks.landmark
         metrics = compute_metrics([(p.x, p.y, p.z) for p in lms])
         key_vis = [lms[i].visibility for i in (NOSE, LEFT_EAR, RIGHT_EAR, LEFT_SHOULDER, RIGHT_SHOULDER)]
         quality_ok = metrics is not None and (sum(key_vis) / len(key_vis)) >= VISIBILITY_MIN
-        return metrics, True, quality_ok
+        person_count = 1
+        try:
+            gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+            faces = self._face_cascade().detectMultiScale(gray, 1.2, 5, minSize=(60, 60))
+            person_count = max(1, len(faces))
+        except Exception:
+            pass  # 数脸失败不阻断姿态链路，按单人保守处理
+        return metrics, True, quality_ok, person_count

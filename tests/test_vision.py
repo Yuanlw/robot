@@ -250,3 +250,58 @@ class SeverityTests(unittest.TestCase):
         self.assertEqual(v.issue_severities(mild, base).get('离屏过近'), 'mild')
         severe = v.compute_metrics(landmarks(width=0.42))  # 1.4 > 1.30 → severe
         self.assertEqual(v.issue_severities(severe, base).get('离屏过近'), 'severe')
+
+
+class MultiPersonTests(unittest.TestCase):
+    """多人帧冻结判定（2026-11-13 多人场景 review）。"""
+
+    def test_multi_frames_freeze_and_notice(self):
+        j = v.PostureJudge()
+        base = datetime(2026, 11, 13, 20, 0)
+        sev = {'头歪': 'severe'}
+        # 第1帧多人：冻结，不提醒，无说明
+        r1 = j.record(1, 9, sev, True, True, base, multi=True)
+        self.assertEqual(r1['warnings'], [])
+        self.assertEqual(r1['suppressed'], 'multi_person')
+        self.assertFalse(r1['multi_notice'])
+        # 第2帧连续多人：触发一次说明
+        r2 = j.record(1, 9, sev, True, True, base + timedelta(seconds=5), multi=True)
+        self.assertTrue(r2['multi_notice'])
+        # 冷却期内不再说明
+        r3 = j.record(1, 9, sev, True, True, base + timedelta(seconds=10), multi=True)
+        self.assertFalse(r3['multi_notice'])
+        # 多人帧不积累姿态统计
+        self.assertEqual(r3['stats']['quality_frames'], 0)
+
+    def test_multi_frames_do_not_trigger_absent(self):
+        j = v.PostureJudge()
+        base = datetime(2026, 11, 13, 20, 0)
+        for i in range(5):  # 连续多人帧不该被当成"没人"
+            r = j.record(1, 9, {}, False, False, base + timedelta(seconds=5 * i), multi=True)
+        self.assertFalse(r['left'])
+
+    def test_normal_frames_resume_after_multi(self):
+        j = v.PostureJudge()
+        base = datetime(2026, 11, 13, 20, 0)
+        j.record(1, 9, {}, True, True, base, multi=True)
+        j.record(1, 9, {}, True, True, base + timedelta(seconds=5), multi=True)
+        # 恢复单人后，severe 连击照常工作
+        for i in range(3):
+            r = j.record(1, 9, {'头歪': 'severe'}, True, True, base + timedelta(seconds=10 + 5 * i))
+        self.assertEqual(r['warnings'], ['头歪'])
+        self.assertEqual(r['stats']['quality_frames'], 3)
+
+
+class MultiStatsTests(StudyCase):
+    def test_behavior_excludes_multi_frames(self):
+        from app import study_behavior
+        sess = study.start_session(1)
+        m = {'head_roll': 2.0, 'shoulder_roll': 1.0, 'shoulder_width': 0.3, 'head_drop': 0.25}
+        for _ in range(3):
+            v.log_frame(sess['id'], 1, True, m, [], [], None)                    # good
+        for _ in range(2):
+            v.log_frame(sess['id'], 1, True, m, ['头歪'], [], None, quality='multi')  # 多人帧
+        p = study_behavior.analyze_behavior_pattern(1)
+        self.assertEqual(p['frames'], 5)
+        self.assertEqual(p['multi_frames'], 2)
+        self.assertEqual(p['posture_good_ratio'], 1.0)  # 多人帧不进比率

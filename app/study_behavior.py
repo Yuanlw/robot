@@ -19,10 +19,11 @@ def analyze_behavior_pattern(person_id: int, days: int = 7) -> dict:
         return {"has_data": False, "frames": 0}
 
     total = len(rows)
-    present_frames = sum(1 for r in rows if r[4])
+    multi = sum(1 for r in rows if r[0] == 'multi')
+    absent = sum(1 for r in rows if r[0] == 'absent')
     good = sum(1 for r in rows if r[0] == 'good')
     poor = sum(1 for r in rows if r[0] == 'poor')
-    absent_ratio = 1 - present_frames / total
+    judged = good + poor  # 多人帧归属不明，不参与任何比率
     warnings = sum(1 for r in rows if r[2])
     responded = sum(1 for r in rows if r[2] and r[3])
 
@@ -36,10 +37,11 @@ def analyze_behavior_pattern(person_id: int, days: int = 7) -> dict:
     return {
         "has_data": True,
         "frames": total,
+        "multi_frames": multi,
         "days": days,
-        "posture_good_ratio": round(good / max(present_frames, 1), 2),
+        "posture_good_ratio": round(good / judged, 2) if judged else None,
         "poor_frames": poor,
-        "absent_ratio": round(absent_ratio, 2),
+        "absent_ratio": round(absent / max(total - multi, 1), 2),
         "warnings_sent": warnings,
         "warning_response_rate": round(responded / warnings, 2) if warnings else None,
         "common_issues": common,
