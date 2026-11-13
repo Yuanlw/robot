@@ -54,18 +54,16 @@ def update(reminder_id: int, text: str, due_at: datetime) -> dict | None:
 
 def due_now(now: datetime | None = None, expiry_hours: int | None = 24) -> list[dict]:
     """Read due reminders; delivery is acknowledged only after successful playback.
-    
+
     expiry_hours: 超过此小时数的过期提醒不再自动播放。None 则不限制过期时间。
-    安静时段：当日 8:00 前不播报，避免深夜/凌晨误扰。
+    注意：用户明确设定的提醒到点必须触发（"早上7点吃药"就是7点响），
+    安静时段只约束机器人自主生成的播报（学习/坐姿，见 study_loop）。
+    陈旧补播风险由 expiry_hours 兜底（2026-11-13 修正误伤的安静时段）。
     """
     current_dt = now or datetime.now().astimezone()
     current = current_dt.isoformat()
-    # 安静时段：当日 8:00 前不播报
-    quiet_ok = current_dt.hour >= 8
-    
+
     with connection() as conn:
-        if not quiet_ok:
-            return []
         if expiry_hours is None:
             rows = conn.execute(
                 "SELECT r.*, p.name AS person_name FROM reminders r LEFT JOIN people p ON p.id=r.person_id "
