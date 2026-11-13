@@ -19,14 +19,18 @@ from .db import connection, now_iso
 NOSE, LEFT_EAR, RIGHT_EAR = 0, 7, 8
 LEFT_SHOULDER, RIGHT_SHOULDER = 11, 12
 
-HEAD_ROLL_LIMIT = 10.0       # 头部侧倾角度上限
-SHOULDER_ROLL_LIMIT = 8.0    # 肩膀水平差上限
+HEAD_ROLL_LIMIT = 10.0       # 头部侧倾角度上限（无基线时的绝对值）
+SHOULDER_ROLL_LIMIT = 8.0    # 肩膀水平差上限（无基线时的绝对值）
+POSTURE_MARGIN = 8.0         # 相对基线的容差：角度超过"个人校准值+此裕度"才算问题
 NEAR_RATIO = 1.12            # 肩宽相对基线超过此比例 = 离屏过近
 HEAD_DROP_RATIO = 0.62       # 鼻-肩垂直距离低于基线此比例 = 头过低/趴桌
 MIN_STREAK = 3               # 连续 N 帧同一问题才提醒（防误报）
-WARNING_COOLDOWN_MIN = 10    # 同一问题提醒冷却
+WARNING_COOLDOWN_MIN = 5     # 同一问题提醒冷却（验证期从 10 分钟放宽到 5，便于采样）
 ABSENT_PAUSE_FRAMES = 3      # 连续 N 帧无人 → 暂停计时
 PRESENT_RESUME_FRAMES = 2    # 暂停后连续 N 帧有人 → 恢复计时
+# 校准质量门槛：基线帧本身超过这些角度说明机位太歪或没坐正，拒绝入库
+CALIBRATE_HEAD_ROLL_MAX = 15.0
+CALIBRATE_SHOULDER_ROLL_MAX = 22.0
 
 
 def compute_metrics(landmarks) -> dict | None:
@@ -55,11 +59,21 @@ def compute_metrics(landmarks) -> dict | None:
 
 
 def check_issues(metrics: dict, baseline: dict) -> list[str]:
-    """对照基线输出问题标签列表。无基线时只做绝对角度判断。"""
+    """对照基线输出问题标签列表。
+
+    2026-11-13 实机教训：笔记本摄像头仰拍会系统性抬高肩线/头倾角度，
+    绝对阈值造成 64% 误判。角度类指标改为"个人校准值 + 裕度"的相对判定；
+    无基线时退回绝对阈值。
+    """
     issues = []
-    if metrics['head_roll'] > HEAD_ROLL_LIMIT:
+    head_limit = HEAD_ROLL_LIMIT
+    shoulder_limit = SHOULDER_ROLL_LIMIT
+    if baseline:
+        head_limit = max(HEAD_ROLL_LIMIT, baseline.get('head_roll', 0) + POSTURE_MARGIN)
+        shoulder_limit = max(SHOULDER_ROLL_LIMIT, baseline.get('shoulder_roll', 0) + POSTURE_MARGIN)
+    if metrics['head_roll'] > head_limit:
         issues.append('头歪')
-    if metrics['shoulder_roll'] > SHOULDER_ROLL_LIMIT:
+    if metrics['shoulder_roll'] > shoulder_limit:
         issues.append('肩不平')
     if baseline:
         if metrics['shoulder_width'] > baseline['shoulder_width'] * NEAR_RATIO:
@@ -67,6 +81,15 @@ def check_issues(metrics: dict, baseline: dict) -> list[str]:
         if metrics['head_drop'] < baseline['head_drop'] * HEAD_DROP_RATIO:
             issues.append('头过低')
     return issues
+
+
+def validate_calibration(metrics: dict) -> str | None:
+    """校准质量门槛：基线帧本身角度过大说明机位歪/没坐正，返回错误文案；合格返回 None。"""
+    if metrics['head_roll'] > CALIBRATE_HEAD_ROLL_MAX:
+        return f"校准帧头侧倾 {metrics['head_roll']:.0f}°，超出 {CALIBRATE_HEAD_ROLL_MAX:.0f}°——请坐直、摆正摄像头后重拍"
+    if metrics['shoulder_roll'] > CALIBRATE_SHOULDER_ROLL_MAX:
+        return f"校准帧肩线差 {metrics['shoulder_roll']:.0f}°，超出 {CALIBRATE_SHOULDER_ROLL_MAX:.0f}°——请把摄像头摆平（不要仰拍/侧拍）后重拍"
+    return None
 
 
 WARNING_TEXT = {

@@ -159,3 +159,28 @@ class PersistenceTests(StudyCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RelativeThresholdTests(unittest.TestCase):
+    def test_angle_issues_use_personal_baseline(self):
+        # 基线本身带 7°/6°（摄像头仰拍的系统性偏差）
+        base = {'shoulder_width': 0.3, 'head_drop': 0.3, 'head_roll': 7.0, 'shoulder_roll': 6.0}
+        m12 = v.compute_metrics(landmarks(tilt_deg=12))
+        # 绝对阈值(10°)会误报；相对阈值 = max(10, 7+8) = 15 → 不报
+        self.assertNotIn('头歪', v.check_issues(m12, base))
+        m18 = v.compute_metrics(landmarks(tilt_deg=18))
+        self.assertIn('头歪', v.check_issues(m18, base))  # 18 > 15 真问题
+
+    def test_no_baseline_falls_back_absolute(self):
+        m = v.compute_metrics(landmarks(tilt_deg=12))
+        self.assertIn('头歪', v.check_issues(m, None))
+
+
+class CalibrationGateTests(unittest.TestCase):
+    def test_reasonable_baseline_passes(self):
+        # Chris 昨晚真实基线（shoulder_roll=16.2）应通过门槛，由相对判定吸收
+        self.assertIsNone(v.validate_calibration({'head_roll': 8.8, 'shoulder_roll': 16.2}))
+
+    def test_extreme_frame_rejected(self):
+        self.assertIsNotNone(v.validate_calibration({'head_roll': 20.0, 'shoulder_roll': 5.0}))
+        self.assertIsNotNone(v.validate_calibration({'head_roll': 3.0, 'shoulder_roll': 30.0}))

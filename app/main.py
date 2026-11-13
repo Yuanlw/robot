@@ -31,6 +31,7 @@ faces = FaceService()
 voice = VoiceService()
 llm = LLMService()
 vision = vision_mod.VisionService()
+study_speech = study.SpeechQueue(max_age_seconds=120)
 conversation_histories: dict[str, dict[str, object]] = {}
 conversation_lock = threading.Lock()
 RECENT_CONVERSATION_MESSAGES = 8
@@ -58,40 +59,45 @@ async def reminder_loop():
 
 
 async def study_loop():
-    """学习陪伴主动提醒循环（第一期：自适应阈值 + 柔性提醒 + 安静时段）。"""
+    """学习陪伴循环（验证期 2026-11-13：频繁+精准优先）。
+
+    每 30 秒：① 会话健康收口（超龄/闲置自动结束，视觉断连暂停、恢复续跑）
+    ② 播报队列 drain（失败重试、超 2 分钟作废，睡眠唤醒不补播陈旧话术）
+    ③ 定时提醒入队（自适应阈值 + 柔性提醒）。8 点前安静时段不播报。
+    """
     if not settings.study_enabled:
         return
-    reminders_spoken_in_hour = []
     while True:
         try:
             now = datetime.now().astimezone()
-            reminders_spoken_in_hour = [t for t in reminders_spoken_in_hour if (now - t).total_seconds() < 3600]
-            if now.hour < 8 or len(reminders_spoken_in_hour) >= settings.study_max_reminders_per_hour:
-                await asyncio.sleep(60)
-                continue
 
-            def resolver(person_id):
-                try:
-                    return study_profiler.thresholds_for_reminder(person_id)
-                except Exception:
-                    return None
+            for sid, pid, action, reason in study.reconcile_sessions(now):
+                vision_mod.tracker.reset(pid)
+                record_event("study_auto", {"session_id": sid, "action": action, "reason": reason})
 
-            needs = study.sessions_needing_reminder(
-                settings.study_focus_minutes, settings.study_break_minutes, threshold_resolver=resolver)
-            for item in needs:
-                if len(reminders_spoken_in_hour) >= settings.study_max_reminders_per_hour:
-                    break
-                sess = item['session']
-                reminder_type = item['type']
-                spoken = item['spoken']
-                if reminder_type == 'break_time':
-                    study.pause_session(sess['id'])
-                elif reminder_type == 'resume_time':
-                    study.resume_session(sess['id'])
-                await asyncio.to_thread(voice.speak, spoken)
-                study.record_reminder(sess['id'], reminder_type, str(item['elapsed']['phase_elapsed_seconds'] // 60))
-                reminders_spoken_in_hour.append(now)
-                record_event("study_reminder", {"session_id": sess['id'], "type": reminder_type, "text": spoken})
+            if now.hour >= 8:
+                for text, status in await asyncio.to_thread(study_speech.drain, voice.speak, now):
+                    record_event("study_speech", {"status": status, "text": text[:60]})
+
+                def resolver(person_id):
+                    try:
+                        return study_profiler.thresholds_for_reminder(person_id)
+                    except Exception:
+                        return None
+
+                needs = study.sessions_needing_reminder(
+                    settings.study_focus_minutes, settings.study_break_minutes, threshold_resolver=resolver)
+                for item in needs:
+                    sess = item['session']
+                    reminder_type = item['type']
+                    spoken = item['spoken']
+                    if reminder_type == 'break_time':
+                        study.pause_session(sess['id'])
+                    elif reminder_type == 'resume_time':
+                        study.resume_session(sess['id'])
+                    study_speech.add(spoken, now)
+                    study.record_reminder(sess['id'], reminder_type, str(item['elapsed']['phase_elapsed_seconds'] // 60))
+                    record_event("study_reminder", {"session_id": sess['id'], "type": reminder_type, "text": spoken})
 
         except Exception as e:
             record_event("study_loop_error", {"error": str(e)})
@@ -737,6 +743,9 @@ async def vision_calibrate(image: UploadFile = File(...), session_id: str = Quer
         data = None  # 帧立即释放
     if not present or not metrics:
         raise HTTPException(422, "没有看清你，请坐直面对摄像头再试")
+    gate_error = vision_mod.validate_calibration(metrics)
+    if gate_error:
+        raise HTTPException(422, gate_error)
     vision_mod.save_baseline(person['id'], metrics)
     vision_mod.tracker.reset(person['id'])
     record_event("vision_calibrated", {"person_id": person['id']})
@@ -782,7 +791,10 @@ async def vision_frame(image: UploadFile = File(...), session_id: str = Query(mi
     vision_mod.log_frame(sess['id'], person['id'], present, metrics, issues,
                          action['warnings'], warning_text)
     if speak_texts:
-        await asyncio.to_thread(voice.speak, warning_text)
-        record_event("vision_warning", {"person_id": person['id'], "text": warning_text})
+        try:
+            await asyncio.to_thread(voice.speak, warning_text)
+            record_event("vision_warning", {"person_id": person['id'], "text": warning_text})
+        except Exception as exc:  # 播报失败不影响守护与状态流转，只记录
+            record_event("vision_warning_failed", {"person_id": person['id'], "error": str(exc)[:120]})
     return {"present": present, "issues": issues, "warnings": speak_texts,
             "paused": action['left'], "resumed": action['returned'], "calibrated": baseline is not None}

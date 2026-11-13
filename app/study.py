@@ -2,7 +2,10 @@
 
 第 0 期：计时 + 主动提醒。
 第 1 期：会话时长持久化、延长语义、自评质量、周期统计快照（study_analytics）。
+验证期修复（2026-11-13）：僵尸会话自动收口（reconcile_sessions）、
+播报送达契约（SpeechQueue：失败重试、过期作废，对齐家庭提醒的交付语义）。
 """
+import threading
 from datetime import datetime, timedelta
 from .db import connection, now_iso
 
@@ -112,8 +115,11 @@ def get_current_session(person_id: int) -> dict | None:
         return dict(row) if row else None
 
 
-def end_session(session_id: int) -> dict:
-    """结束会话，并把学习/休息总时长持久化到会话行（第一期：供画像分析）。"""
+def end_session(session_id: int, reason: str | None = None) -> dict:
+    """结束会话，并把学习/休息总时长持久化到会话行（第一期：供画像分析）。
+
+    reason 非空表示系统自动结束（如超时/闲置），事件记为 auto_end:原因。
+    """
     sess = get_session(session_id)
     if not sess:
         raise ValueError("学习会话不存在")
@@ -124,8 +130,8 @@ def end_session(session_id: int) -> dict:
             (now_iso(), elapsed['study_seconds'], elapsed['break_seconds'], session_id)
         )
         c.execute(
-            "INSERT INTO study_events(session_id,event_type,created_at) VALUES(?,'end',?)",
-            (session_id, now_iso())
+            "INSERT INTO study_events(session_id,event_type,event_data,created_at) VALUES(?,?,?,?)",
+            (session_id, 'end', f"auto_end:{reason}" if reason else None, now_iso())
         )
     return get_session(session_id)
 
@@ -417,3 +423,111 @@ def compute_period_stats(person_id: int, period_start: datetime, period_end: dat
                      stats["early_break_count"], stats["best_time_slot"], stats["worst_time_slot"],
                      str(triggers) if triggers else None, stats["recovery_speed_seconds"], now_iso()))
     return stats
+
+
+def _last_vision_frame(session_id: int):
+    """该会话最近一条视觉帧的 (帧数, 最新时间)。视觉表不存在时返回 (0, None)。"""
+    try:
+        with connection() as c:
+            row = c.execute(
+                "SELECT COUNT(*), MAX(created_at) FROM study_vision_events WHERE session_id=?",
+                (session_id,)).fetchone()
+        return (row[0] or 0), row[1]
+    except Exception:
+        return 0, None
+
+
+def reconcile_sessions(now: datetime = None, max_age_hours: float = 6,
+                       idle_minutes: float = 120, vision_stale_minutes: float = 10) -> list[tuple]:
+    """会话健康收口（验证期规则，2026-11-13 实机教训）：
+
+    1. 超龄：会话开了超过 max_age_hours → 自动结束（跨天忘关的僵尸会话）；
+    2. 闲置：无任何事件且无视觉帧超过 idle_minutes → 自动结束（人早走了）；
+    3. 视觉断连：守护曾出帧、但超过 vision_stale_minutes 没有新帧且会话还在学习中
+       → 自动暂停（页面被关/摄像头被挡，等同于"人不在"语义）；
+    4. 视觉恢复：因断连被自动暂停的会话，帧恢复流动（90 秒内有新帧）→ 自动继续。
+
+    返回 [(session_id, person_id, action, reason)]，action ∈ end/auto_pause/auto_resume。
+    """
+    now = now or datetime.now().astimezone()
+    actions = []
+    with connection() as c:
+        sessions = [dict(r) for r in c.execute(
+            "SELECT * FROM study_sessions WHERE status IN ('active','paused')")]
+    for sess in sessions:
+        sid, pid = sess['id'], sess['person_id']
+        started = datetime.fromisoformat(sess['started_at'])
+        with connection() as c:
+            last_evt = c.execute(
+                "SELECT event_type,created_at FROM study_events WHERE session_id=? ORDER BY id DESC LIMIT 1",
+                (sid,)).fetchone()
+        frame_count, last_frame = _last_vision_frame(sid)
+        stamps = [t for t in (sess['started_at'], last_evt[1] if last_evt else None, last_frame) if t]
+        last_activity = max(stamps)
+
+        if (now - started).total_seconds() > max_age_hours * 3600:
+            end_session(sid, reason='超龄未结束')
+            actions.append((sid, pid, 'end', '超龄未结束'))
+            continue
+        if (now - datetime.fromisoformat(last_activity)).total_seconds() > idle_minutes * 60:
+            end_session(sid, reason='长时间无活动')
+            actions.append((sid, pid, 'end', '长时间无活动'))
+            continue
+        if sess['status'] == 'active' and frame_count and last_frame:
+            if (now - datetime.fromisoformat(last_frame)).total_seconds() > vision_stale_minutes * 60:
+                pause_session(sid)
+                with connection() as c:
+                    c.execute("INSERT INTO study_events(session_id,event_type,event_data,created_at) VALUES(?,'auto_pause','视觉断连',?)",
+                              (sid, now_iso()))
+                actions.append((sid, pid, 'auto_pause', '视觉断连'))
+        elif sess['status'] == 'paused' and last_evt and last_evt[0] == 'auto_pause':
+            if last_frame and (now - datetime.fromisoformat(last_frame)).total_seconds() < 90:
+                resume_session(sid)
+                with connection() as c:
+                    c.execute("INSERT INTO study_events(session_id,event_type,event_data,created_at) VALUES(?,'auto_resume','视觉恢复',?)",
+                              (sid, now_iso()))
+                actions.append((sid, pid, 'auto_resume', '视觉恢复'))
+    return actions
+
+
+class SpeechQueue:
+    """主动播报队列（送达契约）：失败留在队列重试，超过保鲜期作废。
+
+    与家庭提醒同一语义：说出去才算数；机器睡眠唤醒后不补播陈旧内容。
+    """
+
+    def __init__(self, max_age_seconds: int = 120):
+        self.max_age = max_age_seconds
+        self._items: list[tuple[str, datetime]] = []
+        self._lock = threading.Lock()
+
+    def __len__(self):
+        with self._lock:
+            return len(self._items)
+
+    def add(self, text: str, now: datetime = None):
+        now = now or datetime.now().astimezone()
+        with self._lock:
+            if any(t == text for t, _ in self._items):
+                return
+            self._items.append((text, now))
+
+    def drain(self, speak_fn, now: datetime = None) -> list[tuple]:
+        """逐条播报。返回 [(text, 'spoken'|'stale'|'failed')]；failed 回队等待重试。"""
+        now = now or datetime.now().astimezone()
+        with self._lock:
+            pending, self._items = self._items, []
+        results = []
+        for text, queued_at in pending:
+            if (now - queued_at).total_seconds() > self.max_age:
+                results.append((text, 'stale'))
+                continue
+            try:
+                ok = speak_fn(text) == 'spoken'
+            except Exception:
+                ok = False
+            results.append((text, 'spoken' if ok else 'failed'))
+            if not ok:
+                with self._lock:
+                    self._items.append((text, queued_at))
+        return results

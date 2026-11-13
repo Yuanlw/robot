@@ -171,3 +171,94 @@ class ReportTests(StudyCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReconcileTests(StudyCase):
+    def _backdate(self, table, column_value, sql_where, ts):
+        with connection() as c:
+            c.execute(f"UPDATE {table} SET created_at=? WHERE {sql_where}", (ts.isoformat(), column_value))
+
+    def test_overdue_session_auto_ends(self):
+        now = datetime.now().astimezone()
+        sid = self.make_session(1, now - timedelta(hours=7))
+        actions = study.reconcile_sessions(now)
+        self.assertEqual([(a[0], a[2]) for a in actions], [(sid, 'end')])
+        self.assertEqual(study.get_session(sid)['status'], 'completed')
+
+    def test_idle_session_auto_ends(self):
+        now = datetime.now().astimezone()
+        sid = self.make_session(1, now - timedelta(hours=3))
+        actions = study.reconcile_sessions(now)
+        self.assertEqual([(a[0], a[2], a[3]) for a in actions], [(sid, 'end', '长时间无活动')])
+
+    def test_fresh_session_untouched(self):
+        now = datetime.now().astimezone()
+        sid = self.make_session(1, now - timedelta(minutes=10))
+        self.assertEqual(study.reconcile_sessions(now), [])
+        self.assertEqual(study.get_session(sid)['status'], 'active')
+
+    def test_vision_stale_pauses_then_fresh_frame_resumes(self):
+        from app import vision as vision_module
+        now = datetime.now().astimezone()
+        sid = self.make_session(1, now - timedelta(minutes=30))
+        m = {'head_roll': 2.0, 'shoulder_roll': 1.0, 'shoulder_width': 0.3, 'head_drop': 0.25}
+        # 守护曾出帧，但最后一帧在 15 分钟前（页面被关）
+        vision_module.log_frame(sid, 1, True, m, [], [], None)
+        with connection() as c:
+            c.execute("UPDATE study_vision_events SET created_at=?", ((now - timedelta(minutes=15)).isoformat(),))
+        actions = study.reconcile_sessions(now)
+        self.assertEqual([(a[0], a[2]) for a in actions], [(sid, 'auto_pause')])
+        self.assertEqual(study.get_session(sid)['status'], 'paused')
+        # 帧恢复流动（刚出一帧）→ 自动续跑
+        vision_module.log_frame(sid, 1, True, m, [], [], None)
+        actions = study.reconcile_sessions(datetime.now().astimezone())
+        self.assertEqual([(a[0], a[2]) for a in actions], [(sid, 'auto_resume')])
+        self.assertEqual(study.get_session(sid)['status'], 'active')
+
+    def test_manual_pause_not_resumed_by_frames(self):
+        from app import vision as vision_module
+        now = datetime.now().astimezone()
+        sid = self.make_session(1, now - timedelta(minutes=10))
+        study.pause_session(sid)  # 手动休息（无 auto_pause 标记）
+        m = {'head_roll': 2.0, 'shoulder_roll': 1.0, 'shoulder_width': 0.3, 'head_drop': 0.25}
+        vision_module.log_frame(sid, 1, True, m, [], [], None)
+        actions = study.reconcile_sessions(now)
+        self.assertEqual(actions, [])
+        self.assertEqual(study.get_session(sid)['status'], 'paused')
+
+
+class SpeechQueueTests(StudyCase):
+    def test_spoken_and_dedup(self):
+        q = study.SpeechQueue()
+        q.add('休息吧'); q.add('休息吧')
+        self.assertEqual(len(q), 1)
+        said = []
+        out = q.drain(lambda t: said.append(t) or 'spoken')
+        self.assertEqual(out, [('休息吧', 'spoken')])
+        self.assertEqual(len(q), 0)
+
+    def test_failed_retried_then_spoken(self):
+        q = study.SpeechQueue()
+        q.add('休息吧')
+        def fail(t): raise RuntimeError('afplay died')
+        out = q.drain(fail)
+        self.assertEqual(out, [('休息吧', 'failed')])
+        self.assertEqual(len(q), 1)
+        out2 = q.drain(lambda t: 'spoken')
+        self.assertEqual(out2, [('休息吧', 'spoken')])
+        self.assertEqual(len(q), 0)
+
+    def test_stale_dropped(self):
+        from datetime import datetime as dt
+        q = study.SpeechQueue(max_age_seconds=120)
+        t0 = dt.now().astimezone()
+        q.add('休息吧', t0)
+        out = q.drain(lambda t: 'spoken', t0 + timedelta(minutes=5))
+        self.assertEqual(out, [('休息吧', 'stale')])
+        self.assertEqual(len(q), 0)
+
+    def test_text_only_counts_failed(self):
+        q = study.SpeechQueue()
+        q.add('x')
+        out = q.drain(lambda t: 'text-only')  # 无 afplay 的环境
+        self.assertEqual(out, [('x', 'failed')])
