@@ -161,5 +161,26 @@ class StatusTests(ChannelCase):
         self.assertEqual(st['quiet_hours'], '22:00-07:00')
 
 
+class SuppressionDedupTests(unittest.TestCase):
+    """回归：多条提醒交替撞静音时，按同句同原因去重，不再每 15s 刷事件。"""
+    def test_alternating_texts_same_reason_emit_once_each(self):
+        events = []
+        ch = SpeechChannel(lambda t: 'spoken', on_event=events.append)
+        for _ in range(5):  # 模拟两条提醒轮流重试 5 轮
+            ch._record_suppressed('提醒时间到了：喝水', 'muted')
+            ch._record_suppressed('提醒时间到了：吃药', 'muted')
+        suppressed = [e for e in events if e['type'] == 'speech_suppressed']
+        self.assertEqual(len(suppressed), 2)  # 各一条，而非 10 条
+
+    def test_reason_change_reemits(self):
+        events = []
+        ch = SpeechChannel(lambda t: 'spoken', on_event=events.append)
+        ch._record_suppressed('提醒时间到了：喝水', 'deferred_dnd')
+        ch._record_suppressed('提醒时间到了：喝水', 'muted')  # 原因变化 → 再记一次
+        ch._record_suppressed('提醒时间到了：喝水', 'muted')  # 重复 → 跳过
+        suppressed = [e for e in events if e['type'] == 'speech_suppressed']
+        self.assertEqual(len(suppressed), 2)
+
+
 if __name__ == '__main__':
     unittest.main()

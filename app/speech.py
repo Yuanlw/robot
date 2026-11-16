@@ -94,6 +94,7 @@ class SpeechChannel:
         self._stop = False
         self._thread = None
         self._suppressed = collections.deque(maxlen=5)
+        self._suppressed_last: dict[str, str] = {}
         self._mute_cache = (0.0, None)
 
     # ---------- 生命周期 ----------
@@ -160,10 +161,13 @@ class SpeechChannel:
         return None
 
     def _record_suppressed(self, text, reason):
-        last = self._suppressed[-1] if self._suppressed else None
-        if last and last['text'] == text[:80] and last['reason'] == reason:
-            return  # 同句同原因不重复记录（提醒 15s 重试会反复撞静音/勿扰，防刷事件）
-        self._suppressed.append({'text': text[:80], 'reason': reason,
+        # 按"同句同原因"去重（而非仅连续相同）：多条提醒交替撞静音/勿扰时，
+        # 旧逻辑因两条轮流出现而绕过去重，每 15s 刷一条事件淹没"最近状态"。
+        key = text[:80]
+        if self._suppressed_last.get(key) == reason:
+            return
+        self._suppressed_last[key] = reason
+        self._suppressed.append({'text': key, 'reason': reason,
                                  'at': datetime.now().astimezone().isoformat(timespec='seconds')})
         if self._on_event:
             try:
