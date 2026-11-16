@@ -1,4 +1,5 @@
 import json
+import re
 import os
 import tempfile
 import unittest
@@ -172,6 +173,48 @@ class ConversationTests(unittest.TestCase):
         with patch.object(v,'neural_available',return_value=True),patch.object(v,'_neural',side_effect=RuntimeError('fail')),patch.object(v,'_system',return_value=b'RIFFfallback'):
             self.assertEqual(v.synthesize('你好'),b'RIFFfallback')
             self.assertIsNotNone(v.details()['fallback_reason'])
+
+    def test_argmax_command_passes_local_tokenizer_and_short_timeout(self):
+        """回归 2026-11-14 静默无声：--models-path 不含分词器，cli 会联网下载并超时。"""
+        v=VoiceService()
+        tokenizer=v.argmax_tokenizer_dir
+        with patch.object(type(tokenizer),'is_dir',return_value=True), \
+             patch('app.voice.subprocess.run') as run:
+            run.return_value=SimpleNamespace(returncode=0,stdout='',stderr='')
+            with self.assertRaises(RuntimeError):  # 未生成音频即报错
+                v._argmax('你好','serena')
+        cmd=run.call_args.args[0]
+        self.assertIn('--tokenizer',cmd)
+        self.assertEqual(cmd[cmd.index('--tokenizer')+1],str(tokenizer))
+        # 超时必须短于前端等待（20s/12s），否则前端先放弃 → 用户听不到声音
+        self.assertLessEqual(run.call_args.kwargs['timeout'],20)
+
+    def test_argmax_timeout_reports_reason_in_fallback(self):
+        v=VoiceService()
+        with patch.object(v,'argmax_available',return_value=True), \
+             patch.object(v,'neural_available',return_value=True), \
+             patch.object(v,'_argmax',side_effect=RuntimeError('超过 20 秒未完成')), \
+             patch.object(v,'_neural',return_value=b'RIFFkokoro'), \
+             patch.object(settings,'tts_voice','argmax:serena'):
+            self.assertEqual(v.synthesize('你好'),b'RIFFkokoro')
+        self.assertIn('超过 20 秒',v.details()['fallback_reason'])
+
+    def test_voice_timeout_falls_back_to_browser_speech_in_frontend(self):
+        """前端超时后必须改用浏览器音色，不能静默返回（回归同一事故）。"""
+        with open(os.path.join(os.path.dirname(__file__),'..','app','web.html'),encoding='utf-8') as fh:
+            html=fh.read()
+        start=html.index('function scheduleSpeech')
+        body=html[start:html.index('\n}',start)]
+        squashed=body.replace(' ','')
+        # 超时后必须走浏览器音色，且主动停止（无超时）时仍保持静默
+        self.assertIn('expired',body)
+        self.assertIn("e.name==='AbortError'",body)
+        self.assertIn('browserSpeak(text,epoch)',body)
+        self.assertIn("expired?'本地语音合成超时'",squashed)
+        # 超时窗口必须短于后端回退链，否则前端先放弃导致无声
+        waits=[int(m) for m in re.findall(r'setTimeout\(expire,(\d{4,5})\)',body)]
+        self.assertEqual(len(waits),2,body[:200])
+        self.assertTrue(all(w<=20000 for w in waits),waits)
 
 if __name__=='__main__':
     unittest.main()

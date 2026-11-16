@@ -1,5 +1,6 @@
 """Local Mandarin neural speech with an explicit Chinese system fallback."""
 import io
+import logging
 import re
 import shutil
 import subprocess
@@ -13,6 +14,8 @@ import json
 import os
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
 
 
 KOKORO_VOICE_CHOICES = [
@@ -109,6 +112,13 @@ class VoiceService:
     def argmax_model_dir(self) -> Path:
         return Path(os.environ.get("ROBOT_ARGMAX_MODEL_DIR", "/Users/yuanlw/Documents/huggingface/models/argmaxinc/ttskit-coreml"))
 
+    @property
+    def argmax_tokenizer_dir(self) -> Path:
+        # argmax-cli 的 --models-path 只覆盖模型权重，分词器仍会按默认仓库
+        # Qwen/Qwen3-0.6B 联网下载；内网/断网时 90 秒超时后整句无声。
+        # 本机已有该分词器快照，显式传入即可完全离线（实测 3.4s/短句，8.3s/长句）。
+        return Path(os.environ.get("ROBOT_ARGMAX_TOKENIZER_DIR", "/Users/yuanlw/Documents/huggingface/models/Qwen/Qwen3-0.6B"))
+
     def argmax_available(self) -> bool:
         return self.argmax_cli.is_file() and os.access(self.argmax_cli, os.X_OK) and self.argmax_model_dir.is_dir()
 
@@ -168,11 +178,24 @@ class VoiceService:
     def _argmax(self, text: str, speaker: str) -> bytes:
         with tempfile.TemporaryDirectory(prefix="robot-argmax-") as tmp:
             output = Path(tmp) / "speech.wav"
-            subprocess.run([
+            cmd = [
                 str(self.argmax_cli), "tts", "--text", text, "--speaker", speaker,
                 "--language", "chinese", "--model", "0.6b", "--models-path", str(self.argmax_model_dir),
                 "--output-path", str(Path(tmp) / "speech"), "--output-format", "wav",
-            ], check=True, timeout=90, capture_output=True)
+            ]
+            if self.argmax_tokenizer_dir.is_dir():
+                cmd += ["--tokenizer", str(self.argmax_tokenizer_dir)]
+            # 超时必须短于前端等待时间（web.html 首句 20s / 后续 15s），
+            # 否则前端先放弃，用户只听到"没声音"。长句实测 8.3s，留足余量。
+            try:
+                subprocess.run(cmd, check=True, timeout=20, capture_output=True, text=True)
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    "Argmax 合成超过 20 秒未完成，疑似仍在联网下载分词器"
+                    f"（本地分词器目录存在={self.argmax_tokenizer_dir.is_dir()}）。") from exc
+            except subprocess.CalledProcessError as exc:
+                detail = ((exc.stderr or exc.stdout or "").strip().splitlines() or ["无输出"])[-1]
+                raise RuntimeError(f"Argmax 退出码 {exc.returncode}：{detail}") from exc
             if not output.is_file():
                 raise RuntimeError("Argmax 未生成音频。")
             wav = Path(tmp) / "speech-pcm.wav"
@@ -226,8 +249,11 @@ class VoiceService:
             elif settings.tts_voice in ARGMAX_VOICE_IDS and self.argmax_available() and not self._argmax_error:
                 try:
                     audio = self._argmax(text, settings.tts_voice.split(":", 1)[1])
-                except (OSError, subprocess.SubprocessError, RuntimeError):
-                    self._argmax_error = "Argmax 中文语音合成失败，已回退到 Kokoro。"
+                except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+                    # 只留"已回退"会让故障无从追查（2026-11-14 静默无声事故）；
+                    # 原因进日志 + 进 fallback_reason，两次都保留实测可查。
+                    logger.warning("Argmax 语音合成失败，回退 Kokoro：%s", exc)
+                    self._argmax_error = f"Argmax 中文语音合成失败，已回退到 Kokoro（原因：{exc}）。"
                     if self.neural_available():
                         audio = self._neural_fallback(text)
                     else:

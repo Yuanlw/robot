@@ -66,20 +66,30 @@ function say(text){if(!$('autoSpeak').checked||!text.trim())return;scheduleSpeec
 function scheduleSpeech(text,epoch){
   playbackPending++;
   const ctrl=new AbortController();speechRequests.add(ctrl);
-  const timer=setTimeout(()=>{try{ctrl.abort()}catch(e){}},20000);
-  const fetchTask=fetch('/api/voice/audio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text}),signal:ctrl.signal}).then(async r=>{if(!r.ok)throw Error('HTTP '+r.status);return await r.blob()}).finally(()=>{clearTimeout(timer);speechRequests.delete(ctrl)});
+  // 超时必须分两段计时，否则排队句会被白耗额度：预取窗口 20 秒（覆盖后端冷启动），
+  // 播放窗口从"轮到这句"起算 15 秒（热态实测 1~9 秒，含长句）。
+  // 两段都超时才判超时→改用浏览器音色，绝不允许静默返回。
+  let expired=false, waitTimer=null, playTimer=null;
+  const expire=()=>{expired=true;try{ctrl.abort()}catch(e){}};
+  waitTimer=setTimeout(expire,20000);
+  const armPlayTimer=()=>{if(!expired&&!playTimer)playTimer=setTimeout(expire,15000)};
+  const fetchTask=fetch('/api/voice/audio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text}),signal:ctrl.signal}).then(async r=>{if(!r.ok)throw Error('HTTP '+r.status);return await r.blob()}).finally(()=>{clearTimeout(waitTimer);speechRequests.delete(ctrl)});
   fetchTask.catch(()=>{});// 预取失败留到播放段处理（回退浏览器音色），这里只防未处理 rejection
   speechChain=speechChain.then(async()=>{
     try{
     if(epoch!==speechEpoch)return;
     let url;
+    armPlayTimer();// 轮到这句了，开始算播放窗口
     try{
       let blob;
       try{blob=await fetchTask}catch(e){
-        if(epoch!==speechEpoch||e.name==='AbortError')return;
-        $('playbackStatus').textContent='本地语音不可用，尝试浏览器中文音色';
+        // 主动停止（stopVoice/取消）不朗读；超时或其他失败必须出声，
+        // 否则用户只知道"它没说话"（2026-11-14 静默无声事故）。
+        if(epoch!==speechEpoch||(!expired&&e.name==='AbortError'))return;
+        const why=expired?'本地语音合成超时':'本地语音不可用';
         if(robotState!=='listening')setRobotState('speaking');
-        await browserSpeak(text,epoch);return;
+        try{await browserSpeak(text,epoch);$('playbackStatus').textContent=why+'，已用浏览器中文音色朗读'}catch(err){$('playbackStatus').textContent=why+'，且浏览器中文音色不可用：'+err.message}
+        return;
       }
       if(epoch!==speechEpoch)return;
       url=URL.createObjectURL(blob);const audio=new Audio(url);currentAudio=audio;
@@ -89,7 +99,7 @@ function scheduleSpeech(text,epoch){
       await new Promise((resolve,reject)=>{releasePlayback=resolve;audio.onended=resolve;audio.onerror=()=>reject(Error('音频播放失败'));audio.play().catch(()=>reject(Error('浏览器阻止了播放，请点击“重播回答”')))});
       if(epoch===speechEpoch)$('playbackStatus').textContent='语音播放完毕';
     }catch(e){if(epoch===speechEpoch&&e.name!=='AbortError')$('playbackStatus').textContent=e.message}
-    finally{if(url)URL.revokeObjectURL(url);if(epoch===speechEpoch){currentAudio=null;releasePlayback=null}}
+    finally{clearTimeout(playTimer);if(url)URL.revokeObjectURL(url);if(epoch===speechEpoch){currentAudio=null;releasePlayback=null}}
     }finally{
       playbackPending=Math.max(0,playbackPending-1);
       if(playbackPending===0&&robotState==='speaking')setRobotState('idle');
