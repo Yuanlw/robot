@@ -80,6 +80,15 @@ python3.12 -m venv .venv-voice
 .venv-voice/bin/python -B scripts/identity_smoke.py
 ```
 
+**语音真实链路冒烟（每次重启服务后、任何对话之前必跑）**：单测里语音是 mock、e2e 走的是服务端另一条路，都盖不住"浏览器第一句出声"。此脚本打真实运行中的服务，断言第一句 20 秒内返回非静音 WAV 且无降级：
+
+```bash
+./run.sh   # 启动后立刻执行，不要先在页面说话
+.venv-voice/bin/python scripts/smoke_voice.py
+```
+
+前端播放逻辑（超时必出声/取消必静默/正常播本地）由 node 真跑 `web.html` 验证，已并入 unittest（无 node 时跳过）：`node tests/frontend_speech.mjs`。
+
 已验证真实模型的时间、天气、多轮补全、提醒修改/确认/取消、旧摘要迁移与会话隔离，以及服务端语音识别（整句约 0.5 秒、逐字正确）和百炼云端音色合成（首片约 0.37 秒）。浏览器麦克风录音链路、人脸、到点声音播放仍需设备实测。
 
 第二阶段再接桌面机器人外壳与交互硬件，之后才考虑移动、自主感知与行动。

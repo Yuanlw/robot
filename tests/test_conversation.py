@@ -1,5 +1,4 @@
 import json
-import re
 import os
 import tempfile
 import unittest
@@ -199,22 +198,7 @@ class ConversationTests(unittest.TestCase):
             self.assertEqual(v.synthesize('你好'),b'RIFFkokoro')
         self.assertIn('超过 20 秒',v.details()['fallback_reason'])
 
-    def test_voice_timeout_falls_back_to_browser_speech_in_frontend(self):
-        """前端超时后必须改用浏览器音色，不能静默返回（回归同一事故）。"""
-        with open(os.path.join(os.path.dirname(__file__),'..','app','web.html'),encoding='utf-8') as fh:
-            html=fh.read()
-        start=html.index('function scheduleSpeech')
-        body=html[start:html.index('\n}',start)]
-        squashed=body.replace(' ','')
-        # 超时后必须走浏览器音色，且主动停止（无超时）时仍保持静默
-        self.assertIn('expired',body)
-        self.assertIn("e.name==='AbortError'",body)
-        self.assertIn('browserSpeak(text,epoch)',body)
-        self.assertIn("expired?'本地语音合成超时'",squashed)
-        # 超时窗口必须短于后端回退链，否则前端先放弃导致无声
-        waits=[int(m) for m in re.findall(r'setTimeout\(expire,(\d{4,5})\)',body)]
-        self.assertEqual(len(waits),2,body[:200])
-        self.assertTrue(all(w<=20000 for w in waits),waits)
+    # 前端超时/取消/正常播放的行为测试在 tests/test_frontend_speech.py（node 真跑）。
 
 if __name__=='__main__':
     unittest.main()
