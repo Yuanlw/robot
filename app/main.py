@@ -10,7 +10,9 @@ import threading
 import tempfile
 import wave
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Query
+import numpy as np
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -26,12 +28,14 @@ from . import agent_store, bailian, identity, study, study_profiler
 from . import study_report
 from . import vision as vision_mod
 from . import speech
+from . import realtime
 from .csrf import CSRFMiddleware
 
 faces = FaceService()
 voice = VoiceService()
 llm = LLMService()
 vision = vision_mod.VisionService()
+realtime_voice = realtime.RealtimeVoiceService()
 speech_channel = speech.SpeechChannel(
     lambda text: voice.speak(text),
     quiet_start=settings.quiet_start_hour, quiet_end=settings.quiet_end_hour,
@@ -940,3 +944,91 @@ async def speech_dnd_off():
     speech.clear_dnd()
     record_event("dnd_cleared", {})
     return speech_channel.status()
+
+
+# ===== 学习模式纯语音对话（阶段 B 第一步：常开麦 + 唤醒词 + VAD 断句，半双工） =====
+
+@app.websocket("/ws/voice")
+async def ws_voice(websocket: WebSocket):
+    await websocket.accept()
+    session_id = websocket.query_params.get("session_id") or "default"
+    if not realtime_voice.available():
+        await websocket.send_json({"type": "error", "message": "纯语音对话未就绪（缺模型或依赖），请用按钮模式。"})
+        await websocket.close()
+        return
+    vs = realtime_voice.create_session()
+    send_lock = asyncio.Lock()
+    proc_task: asyncio.Task | None = None
+
+    async def send(payload):
+        async with send_lock:
+            await websocket.send_json(payload)
+
+    async def send_bytes(data):
+        async with send_lock:
+            await websocket.send_bytes(data)
+
+    async def back_to_listening():
+        vs.set_state("listening")
+        await send({"type": "state", "state": "listening"})
+
+    async def process(pcm):
+        try:
+            await send({"type": "state", "state": "thinking"})
+            pcm16 = (np.clip(pcm, -1, 1) * 32767).astype(np.int16).tobytes()
+            text = (await asyncio.to_thread(bailian.stt_transcribe, pcm16, 16000) or "").strip()
+            if not text:
+                await back_to_listening()
+                return
+            await send({"type": "transcript", "text": text})
+            rev = identity.current(session_id)["revision"]
+            result = await agent.run(session_id, text, expected_revision=rev)
+            reply = result.get("reply", "")
+            await send({"type": "reply", "text": reply, "drafts": result.get("drafts", [])})
+            if not reply:
+                await back_to_listening()
+                return
+            audio = await asyncio.to_thread(voice.synthesize, reply)
+            vs.set_state("speaking")
+            await send({"type": "state", "state": "speaking"})
+            await send_bytes(audio)
+            # 兜底：浏览器若未回 playback_done（如自动播放被阻），按音频时长自动恢复听
+            with wave.open(io.BytesIO(audio)) as w:
+                duration = w.getnframes() / w.getframerate()
+            await asyncio.sleep(duration + 0.8)
+            if vs.state == "speaking":
+                await back_to_listening()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await send({"type": "error", "message": str(exc)[:120]})
+            await back_to_listening()
+
+    await send({"type": "ready", "state": "listening", "wake": realtime.WAKE_LABEL})
+    try:
+        while True:
+            msg = await websocket.receive()
+            if msg["type"] == "websocket.disconnect":
+                break
+            if msg.get("bytes") is not None:
+                pcm = np.frombuffer(msg["bytes"], dtype=np.int16).astype(np.float32) / 32768.0
+                for event in vs.accept(pcm):
+                    if event["type"] == "wake":
+                        await send({"type": "wake"})
+                    elif event["type"] == "endpoint":
+                        if proc_task is None or proc_task.done():
+                            proc_task = asyncio.create_task(process(event["pcm"]))
+            elif msg.get("text") is not None:
+                ctrl = json.loads(msg["text"])
+                if ctrl.get("type") == "playback_done":
+                    if vs.state == "speaking":
+                        await back_to_listening()
+                elif ctrl.get("type") == "stop":
+                    if proc_task and not proc_task.done():
+                        proc_task.cancel()
+                    await back_to_listening()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if proc_task and not proc_task.done():
+            proc_task.cancel()
