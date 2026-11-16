@@ -23,10 +23,11 @@ TOOLS = [
     schema('get_current_time', '获取准确时间。相对提醒优先使用提出时间那一轮应用提供的 input_reference_id；补充事项时沿用该基准。'),
     schema('get_weather', '查询指定城市的当前天气和今天/明天/后天天气预报。地点不明确先追问，查询失败不能编造。', {
         'city': {'type': 'string'}, 'day': {'type': 'integer', 'enum': [0, 1, 2], 'description': '0今天，1明天，2后天，默认0'}}, ['city']),
-    schema('prepare_reminder', '创建待确认草稿，尚未生效。缺少时间或具体事项先追问。修改草稿传 draft_id；修改已生效提醒先查询并传 reminder_id。仅改内容时不传时间，保留原时间。', {
+    schema('prepare_reminder', '创建待确认草稿，尚未生效。缺少时间或具体事项先追问。修改草稿传 draft_id；修改已生效提醒先查询并传 reminder_id。仅改内容时不传时间，保留原时间。用户说"每天/每周"重复提醒时传 repeat。', {
         'scope': {'type': 'string', 'enum': ['personal', 'household'], 'description': '默认当前成员个人提醒；用户明确说全家/大家才用household。访客默认家庭共享，必须告知归属；若要求个人提醒，先请用户选择成员。'},
-        'text': {'type': 'string'}, 'due_at': {'type': 'string', 'description': '明确钟点使用带时区 ISO8601'},
+        'text': {'type': 'string'}, 'due_at': {'type': 'string', 'description': '明确钟点使用带时区 ISO8601；重复提醒填首次到期时间'},
         'delay_seconds': {'type': 'integer', 'description': '相对时长，1分钟=60，不传 due_at'},
+        'repeat': {'type': 'string', 'enum': ['once', 'daily', 'weekly'], 'description': 'once单次（默认）；daily每天同一时刻；weekly每周同一时刻。"每天练琴"=daily，"每周一开会"=weekly'},
         'reference_id': {'type': 'string'}, 'draft_id': {'type': 'string'}, 'reminder_id': {'type': 'integer'}}),
     schema('confirm_reminder', '仅用户明确确认当前草稿后调用。应用验证本轮确认授权，拒绝模型自行确认。', {
         'id': {'type': 'string'}, 'revision': {'type': 'integer'}}, ['id', 'revision']),

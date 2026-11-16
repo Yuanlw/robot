@@ -125,6 +125,31 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(self.client.delete(f'/api/reminders/{reminder_id}').status_code, 200)
         self.assertNotIn(reminder_id, [item['id'] for item in self.client.get('/api/reminders').json()])
 
+    def test_repeat_reminder_api_and_draft_chain(self):
+        init_db()
+        from app import agent_store
+        due = (datetime.now().astimezone() + timedelta(days=1)).replace(hour=20, minute=0, second=0, microsecond=0)
+        # 表单路径：创建每天提醒
+        created = self.client.post('/api/reminders', json={'text': '练琴', 'due_at': due.isoformat(), 'repeat_rule': 'daily'})
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(created.json()['repeat_rule'], 'daily')
+        rid = created.json()['id']
+        # 编辑不传 repeat → 保留 daily（不得误重置为 once）
+        edited = self.client.patch(f'/api/reminders/{rid}', json={'text': '练琴', 'due_at': due.isoformat()})
+        self.assertEqual(edited.json()['repeat_rule'], 'daily')
+        # 改为每周
+        weekly = self.client.patch(f'/api/reminders/{rid}', json={'text': '练琴', 'due_at': due.isoformat(), 'repeat_rule': 'weekly'})
+        self.assertEqual(weekly.json()['repeat_rule'], 'weekly')
+        self.client.delete(f'/api/reminders/{rid}')
+        # 草稿路径（模拟 agent prepare_reminder 带 repeat）→ 确认落库带 repeat
+        sid = agent_store.session('repeat-draft-browser')['harness_id']
+        draft = agent_store.prepare(sid, {'text': '吃药', 'due_at': due.isoformat(), 'repeat': 'daily'},
+                                    datetime.now().astimezone().isoformat(), None)
+        self.assertEqual(draft['repeat_rule'], 'daily')
+        confirmed = agent_store.confirm(sid, draft['id'], draft['revision'])
+        self.assertEqual(confirmed['repeat_rule'], 'daily')
+        self.client.delete(f"/api/reminders/{confirmed['id']}")
+
     def test_reminder_rejects_past_time_and_blank_content(self):
         past = (datetime.now().astimezone() - timedelta(minutes=1)).isoformat()
         self.assertEqual(self.client.post('/api/reminders', json={'text': '过期', 'due_at': past}).status_code, 422)

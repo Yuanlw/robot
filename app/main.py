@@ -146,7 +146,7 @@ class ReminderIn(BaseModel):
     text: str = Field(min_length=1, max_length=300)
     due_at: datetime
     person_id: int | None = None
-    repeat_rule: Literal["once"] = "once"
+    repeat_rule: Literal["once", "daily", "weekly"] | None = None
     scope: Literal["personal", "household"] | None = None
 
     @field_validator('due_at')
@@ -245,7 +245,7 @@ def add_reminder(payload: ReminderIn, session_id: str | None = None, identity_re
         raise HTTPException(422, '家庭成员不存在')
     if payload.due_at <= datetime.now().astimezone():
         raise HTTPException(422, "提醒时间需要设为未来时间。")
-    return create(payload.text, payload.due_at, payload.person_id, payload.repeat_rule)
+    return create(payload.text, payload.due_at, payload.person_id, payload.repeat_rule or "once")
 
 
 @app.patch("/api/reminders/{reminder_id}")
@@ -254,7 +254,7 @@ def edit_reminder(reminder_id: int, payload: ReminderIn, session_id: str | None 
         check_reminder_owner(reminder_id, session_id, identity_revision)
     if payload.due_at <= datetime.now().astimezone():
         raise HTTPException(422, "提醒时间需要设为未来时间。")
-    item = update(reminder_id, payload.text, payload.due_at)
+    item = update(reminder_id, payload.text, payload.due_at, payload.repeat_rule)
     if not item:
         raise HTTPException(404, "提醒不存在或已经送达/取消。")
     return item
@@ -621,6 +621,7 @@ class DraftConfirmation(BaseModel):
 class DraftEdit(DraftConfirmation):
     text: str = Field(min_length=1, max_length=300)
     due_at: datetime
+    repeat_rule: Literal["once", "daily", "weekly"] | None = None
 
 
 @app.get('/api/conversations/{session_id}/drafts')
@@ -652,7 +653,7 @@ async def edit_draft(draft_id: str, payload: DraftEdit):
         if not current or current['revision'] != payload.revision:
             raise HTTPException(409, '草稿已修改，请确认最新内容。')
         try:
-            return agent_store.prepare(sid, {'draft_id': draft_id, 'text': payload.text, 'due_at': payload.due_at.isoformat()}, datetime.now().astimezone().isoformat(), speaker['person']['id'] if speaker['person'] else None)
+            return agent_store.prepare(sid, {'draft_id': draft_id, 'text': payload.text, 'due_at': payload.due_at.isoformat(), 'repeat': payload.repeat_rule}, datetime.now().astimezone().isoformat(), speaker['person']['id'] if speaker['person'] else None)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 

@@ -23,6 +23,8 @@ def init_agent_db():
         columns = {r['name'] for r in c.execute('PRAGMA table_info(agent_drafts)')}
         if 'person_id' not in columns:
             c.execute('ALTER TABLE agent_drafts ADD COLUMN person_id INTEGER')
+        if 'repeat_rule' not in columns:
+            c.execute("ALTER TABLE agent_drafts ADD COLUMN repeat_rule TEXT NOT NULL DEFAULT 'once'")
     identity.init_identity_db()
 
 
@@ -114,15 +116,21 @@ def prepare(sid, args, received_at, person_id=None):
         else:
             raise ValueError("缺少时间，请询问用户")
         future(due)
+        repeat = args.get('repeat')
+        if repeat is None:
+            repeat = base['repeat_rule'] if base else 'once'
+        if repeat not in ('once', 'daily', 'weekly'):
+            raise ValueError('重复规则不正确（once/daily/weekly）')
         if old:
             rid = old['id']
-            c.execute("UPDATE agent_drafts SET text=?,due_at=?,person_id=?,revision=revision+1 WHERE id=?", (text, due, owner, rid))
+            c.execute("UPDATE agent_drafts SET text=?,due_at=?,person_id=?,repeat_rule=?,revision=revision+1 WHERE id=?",
+                      (text, due, owner, repeat, rid))
         else:
             # One pending draft per conversation makes voice confirmation unambiguous.
             c.execute("UPDATE agent_drafts SET status='superseded' WHERE session_id=? AND status='draft'", (sid,))
             rid = uuid.uuid4().hex
-            c.execute("INSERT INTO agent_drafts(id,session_id,text,due_at,target_id,created_at,person_id) VALUES (?,?,?,?,?,?,?)",
-                      (rid, sid, text, due, target_id, now_iso(), owner))
+            c.execute("INSERT INTO agent_drafts(id,session_id,text,due_at,target_id,created_at,person_id,repeat_rule) VALUES (?,?,?,?,?,?,?,?)",
+                      (rid, sid, text, due, target_id, now_iso(), owner, repeat))
         return dict(c.execute("SELECT * FROM agent_drafts WHERE id=?", (rid,)).fetchone())
 
 
@@ -140,12 +148,12 @@ def confirm(sid, draft_id, revision):
         future(row['due_at'])
         if row['target_id'] is not None:
             rid = row['target_id']
-            if c.execute("UPDATE reminders SET text=?,due_at=? WHERE id=? AND status='active'",
-                         (row['text'], row['due_at'], rid)).rowcount != 1:
+            if c.execute("UPDATE reminders SET text=?,due_at=?,repeat_rule=? WHERE id=? AND status='active'",
+                         (row['text'], row['due_at'], row['repeat_rule'], rid)).rowcount != 1:
                 raise ValueError("原提醒已送达或取消，请重新查询")
         else:
-            rid = c.execute("INSERT INTO reminders(text,due_at,created_at,person_id) VALUES (?,?,?,?)",
-                            (row['text'], row['due_at'], now_iso(), row['person_id'])).lastrowid
+            rid = c.execute("INSERT INTO reminders(text,due_at,created_at,person_id,repeat_rule) VALUES (?,?,?,?,?)",
+                            (row['text'], row['due_at'], now_iso(), row['person_id'], row['repeat_rule'])).lastrowid
         c.execute("UPDATE agent_drafts SET status='confirmed',reminder_id=? WHERE id=?", (rid, draft_id))
         c.execute("INSERT INTO events(event_type,payload,created_at) VALUES (?,?,?)",
                   ('reminder_saved', json.dumps({'reminder_id': rid, 'text': row['text']}, ensure_ascii=False), now_iso()))
