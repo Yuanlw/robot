@@ -150,6 +150,20 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(confirmed['repeat_rule'], 'daily')
         self.client.delete(f"/api/reminders/{confirmed['id']}")
 
+    def test_transcript_persists_for_reload_and_clears(self):
+        init_db()
+        sid = 'transcript-test'
+        with patch.object(llm, 'stream_messages', return_value=iter(['你好呀，家人。'])):
+            events = sse(self.client.post('/api/command/stream', params={'text': '你好', 'session_id': sid}))
+        self.assertEqual(events[-1]['type'], 'done')
+        turns = self.client.get(f'/api/conversations/{sid}/messages').json()
+        self.assertEqual([t['role'] for t in turns], ['user', 'assistant'])
+        self.assertEqual(turns[0]['text'], '你好')
+        self.assertEqual(turns[1]['text'], '你好呀，家人。')
+        # 新对话清空转录
+        self.assertEqual(self.client.delete(f'/api/conversations/{sid}').status_code, 200)
+        self.assertEqual(self.client.get(f'/api/conversations/{sid}/messages').json(), [])
+
     def test_reminder_rejects_past_time_and_blank_content(self):
         past = (datetime.now().astimezone() - timedelta(minutes=1)).isoformat()
         self.assertEqual(self.client.post('/api/reminders', json={'text': '过期', 'due_at': past}).status_code, 422)

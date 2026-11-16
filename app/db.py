@@ -51,6 +51,14 @@ def init_db() -> None:
                 messages TEXT NOT NULL DEFAULT '[]',
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS conversation_turns (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope_key TEXT NOT NULL,
+                role TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_turns_scope ON conversation_turns(scope_key, id);
             """
         )
 
@@ -102,3 +110,30 @@ def delete_conversation_memory(session_id: str) -> None:
     init_db()
     with connection() as conn:
         conn.execute("DELETE FROM conversation_memories WHERE session_id=?", (session_id,))
+
+
+def record_turn(scope_key: str, role: str, text: str) -> None:
+    """逐轮记录对话转录（按身份 scope_key 归属），供刷新页面后恢复可见聊天。
+
+    与 conversation_memories（legacy 摘要记忆）分工：这里只存可见转录，
+    不参与模型上下文；harness 后端的模型记忆仍在 dsh 会话里。
+    """
+    text = (text or "").strip()
+    if not text:
+        return
+    with connection() as conn:
+        conn.execute("INSERT INTO conversation_turns(scope_key,role,text,created_at) VALUES(?,?,?,?)",
+                     (scope_key, role, text[:4000], now_iso()))
+
+
+def list_turns(scope_key: str, limit: int = 40) -> list[dict]:
+    with connection() as conn:
+        rows = conn.execute(
+            "SELECT role,text,created_at FROM conversation_turns WHERE scope_key=? ORDER BY id DESC LIMIT ?",
+            (scope_key, limit)).fetchall()
+    return [{"role": r["role"], "text": r["text"], "created_at": r["created_at"]} for r in reversed(rows)]
+
+
+def delete_turns(scope_key: str) -> None:
+    with connection() as conn:
+        conn.execute("DELETE FROM conversation_turns WHERE scope_key=?", (scope_key,))

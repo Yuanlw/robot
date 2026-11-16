@@ -124,7 +124,7 @@ function applyIdentity(next,announce=false){
     stopVoice();stopListening();voiceFinal='';$('chatInput').value='';lastReply='';messages.replaceChildren();
     $('editReminderDialog').close();$('reminderText').value='';$('due').value='';
     $('requestStatus').textContent='';$('latency').textContent='';$('playbackStatus').textContent='';$('reminderFormStatus').textContent='';
-    addMsg(next.person?'你好，'+next.person.name+'。我们可以接着聊。':'已切换到访客聊天。你可以选择成员，让我接续你的记忆。');
+    addMsg(next.person?'你好，'+next.person.name+'。我们可以接着聊。':'已切换到访客聊天。你可以选择成员，让我接续你的记忆。');loadMessages();
     $('events').replaceChildren();$('reminders').replaceChildren();$('nextReminder').textContent='正在加载提醒…';
   }
   if(announce){const greeting=next.person?'你好，'+next.person.name+'。我在听。':'现在是访客聊天。';say(greeting)}
@@ -186,6 +186,16 @@ async function loadDrafts(){
     document.querySelectorAll('.draft-actions[data-source="harness"]').forEach(node=>node.remove());
     drafts.forEach(d=>confirmation({...d,draft_id:d.id}));
   }catch(e){}
+}
+async function loadMessages(){
+  if(!speaker)return;const revision=speaker.revision;
+  try{
+    const r=await fetch('/api/conversations/'+encodeURIComponent(sessionId)+'/messages');
+    if(!r.ok)return;const turns=await r.json();if(!sameSpeaker(revision))return;
+    messages.replaceChildren();
+    if(!turns.length){addMsg(speaker.person?'你好，'+speaker.person.name+'。我们可以接着聊。':'你好，我可以和你聊天，也可以帮你设置提醒。');return;}
+    turns.forEach(t=>addMsg(t.text,t.role==='user'?'user':'bot'));
+  }catch(e){if(!messages.childElementCount)addMsg('你好，我可以和你聊天，也可以帮你设置提醒。')}
 }
 async function send(){
   const text=$('chatInput').value.trim();if(!text||busy||identityBusy||!speaker)return;
@@ -372,7 +382,7 @@ $('studyReport').onclick=async()=>{if(!speaker||!speaker.person){$('studyStatus'
 async function loadSpeechStatus(){const b=$('speechBanner'),btn=$('dndBtn');if(!b||!btn)return;try{const r=await fetch('/api/speech/status');if(!r.ok)return;const d=await r.json();if(d.dnd_active){b.hidden=false;b.className='status warn';const t=d.dnd_until?new Date(d.dnd_until).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'';b.textContent='勿扰中（至 '+t+'）：我不主动说话，到点提醒会延后。';btn.textContent='解除勿扰'}else if(d.muted===true){b.hidden=false;b.className='status warn';b.textContent='⚠️ 系统静音或音量为 0——提醒播了你也听不到，请先调音量。';btn.textContent='安静1小时'}else if(d.suppressed&&d.suppressed.length){const s=d.suppressed[d.suppressed.length-1];b.hidden=false;b.className='status';b.textContent='刚才没说出口（'+s.reason+'）：'+s.text;btn.textContent='安静1小时'}else{b.hidden=true;btn.textContent='安静1小时'}}catch(e){}}
 $('dndBtn').onclick=async()=>{try{const d=await (await fetch('/api/speech/status')).json();const r=d.dnd_active?await fetch('/api/speech/dnd',{method:'DELETE'}):await fetch('/api/speech/dnd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});if(!r.ok)throw Error('设置失败');await loadSpeechStatus()}catch(e){const b=$('speechBanner');b.hidden=false;b.className='status warn';b.textContent=e.message}};
 async function refresh(){try{await loadIdentity();loadReminders();loadEvents();health();loadDrafts();loadStudy();loadSpeechStatus()}catch(e){$('speakerHint').textContent=e.message}}
-Promise.all([loadPeople(),loadIdentity()]).then(()=>{loadReminders();loadDrafts();loadEvents();health();loadStudy();loadSpeechStatus()}).catch(e=>$('speakerHint').textContent=e.message);setInterval(refresh,10000);
+Promise.all([loadPeople(),loadIdentity()]).then(()=>{loadMessages();loadReminders();loadDrafts();loadEvents();health();loadStudy();loadSpeechStatus()}).catch(e=>$('speakerHint').textContent=e.message);setInterval(refresh,10000);
 let recognition=null, listening=false, manualStop=false, voiceFinal='';
 let micMode=null;
 const TARGET_RATE=16000, FLUSH_WAIT_MS=150;

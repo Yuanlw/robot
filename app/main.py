@@ -14,7 +14,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Query
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-from .db import init_db, list_events, record_event, get_conversation_memory, save_conversation_memory, delete_conversation_memory
+from .db import init_db, list_events, record_event, get_conversation_memory, save_conversation_memory, delete_conversation_memory, record_turn, list_turns, delete_turns
 from .commands import parse_reminder
 from .face import FaceService
 from .reminders import cancel, create, due_now, list_active, mark_delivered, update
@@ -533,8 +533,17 @@ def voice_audio(payload: SpeechIn):
 async def stream_command(text: str = Query(min_length=1, max_length=2000), session_id: str = Query(default="default", min_length=1, max_length=100), identity_revision: int | None = None):
     if settings.agent_backend == 'harness':
         async def stream():
+            scope_key = identity.current(session_id)['scope_key']
+            record_turn(scope_key, 'user', text)
+            reply_parts, finished = [], False
             async for event in agent.stream(session_id, text, expected_revision=identity_revision):
+                if event.get('type') == 'delta':
+                    reply_parts.append(event.get('text', ''))
+                elif event.get('type') == 'done':
+                    finished = True
                 yield 'data: ' + json.dumps(event, ensure_ascii=False) + '\n\n'
+            if finished:
+                record_turn(scope_key, 'assistant', ''.join(reply_parts))
         return StreamingResponse(stream(), media_type='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
     return legacy_stream_command(text, session_id)
 
@@ -550,6 +559,8 @@ def legacy_stream_command(text, session_id):
 
     def events():
         started = time.monotonic()
+        scope_key = identity.current(session_id)['scope_key']
+        record_turn(scope_key, 'user', text)
         yield emit({"type": "start"})
         if parsed:
             reminder_text, due_at = parsed
@@ -591,6 +602,7 @@ def legacy_stream_command(text, session_id):
                         updated.extend([{"role": "user", "content": text}, {"role": "assistant", "content": answer}])
                         saved_summary = str(memory["summary"])
                     save_conversation_memory(session_id, saved_summary, updated)
+                    record_turn(scope_key, 'assistant', answer)
             except RuntimeError as exc:
                 yield emit({"type": "error", "message": str(exc)})
                 return
@@ -609,6 +621,7 @@ async def clear_conversation(session_id: str, identity_revision: int | None = No
         with conversation_lock:
             conversation_histories.pop(session_id, None)
         delete_conversation_memory(session_id)
+        delete_turns(identity.current(session_id)['scope_key'])
     return {"ok": True}
 
 
@@ -627,6 +640,12 @@ class DraftEdit(DraftConfirmation):
 @app.get('/api/conversations/{session_id}/drafts')
 def pending_drafts(session_id: str):
     return agent_store.drafts(agent_store.session(session_id)['harness_id'])
+
+
+@app.get('/api/conversations/{session_id}/messages')
+def conversation_messages(session_id: str, limit: int = Query(default=40, ge=1, le=100)):
+    """刷新页面后恢复可见聊天转录（按当前身份归属；不参与模型上下文）。"""
+    return list_turns(identity.current(session_id)['scope_key'], limit)
 
 
 @app.post('/api/reminder-drafts/{draft_id}/confirm')
