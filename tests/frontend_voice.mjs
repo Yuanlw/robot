@@ -85,6 +85,14 @@ function makeEnv() {
   check('barge_in 转倾听', env.calls.state.includes('listening'), JSON.stringify(env.calls.state));
   check('barge_in 不发 playback_done', !env.calls.sent.some(m => JSON.parse(m).type === 'playback_done'), JSON.stringify(env.calls.sent));
 }
+// 6) 长对话参与态：免唤醒提示 + 退出提示
+{
+  const env = makeEnv();
+  env.handleVoiceMsg({ type: 'state', state: 'engaged_listening', engaged: true });
+  check('参与态提示免唤醒', env.calls.status.some(t => t.includes('免唤醒')), JSON.stringify(env.calls.status));
+  env.handleVoiceMsg({ type: 'disengaged' });
+  check('退出提示重新唤醒', env.calls.status.some(t => t.includes('重新开始')), JSON.stringify(env.calls.status));
+}
 
 console.log(failed === 0 ? 'FRONTEND_VOICE=PASS' : 'FRONTEND_VOICE=FAIL(' + failed + ')');
 process.exit(failed === 0 ? 0 : 1);

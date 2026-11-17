@@ -970,7 +970,7 @@ async def ws_voice(websocket: WebSocket):
 
     async def back_to_listening():
         vs.set_state("listening")
-        await send({"type": "state", "state": "listening"})
+        await send({"type": "state", "state": vs.state, "engaged": vs.engaged})
 
     async def process(pcm):
         try:
@@ -981,12 +981,21 @@ async def ws_voice(websocket: WebSocket):
                 await back_to_listening()
                 return
             await send({"type": "transcript", "text": text})
+            closing = any(p in text for p in realtime.CLOSE_PHRASES)
             rev = identity.current(session_id)["revision"]
             result = await agent.run(session_id, text, expected_revision=rev)
             reply = result.get("reply", "")
             await send({"type": "reply", "text": reply, "drafts": result.get("drafts", [])})
+
+            async def end_turn():
+                if closing:
+                    vs.disengage()
+                    await send({"type": "state", "state": "idle", "engaged": False})
+                else:
+                    await back_to_listening()
+
             if not reply:
-                await back_to_listening()
+                await end_turn()
                 return
             audio = await asyncio.to_thread(voice.synthesize, reply)
             vs.set_state("speaking")
@@ -997,7 +1006,7 @@ async def ws_voice(websocket: WebSocket):
                 duration = w.getnframes() / w.getframerate()
             await asyncio.sleep(duration + 0.8)
             if vs.state == "speaking":
-                await back_to_listening()
+                await end_turn()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1020,6 +1029,8 @@ async def ws_voice(websocket: WebSocket):
                         if proc_task and not proc_task.done():
                             proc_task.cancel()
                         await send({"type": "barge_in"})
+                    elif event["type"] == "disengaged":
+                        await send({"type": "disengaged"})
                     elif event["type"] == "endpoint":
                         if proc_task is None or proc_task.done():
                             proc_task = asyncio.create_task(process(event["pcm"]))
@@ -1028,6 +1039,10 @@ async def ws_voice(websocket: WebSocket):
                 if ctrl.get("type") == "playback_done":
                     if vs.state == "speaking":
                         await back_to_listening()
+                    # 播放已确认完成 → 取消兜底计时任务，否则它仍 sleep 占用 proc_task，
+                    # 下一轮 endpoint 会被 "proc_task.done()" 守卫丢弃（长对话第二轮失效根因）。
+                    if proc_task and not proc_task.done():
+                        proc_task.cancel()
                 elif ctrl.get("type") == "stop":
                     if proc_task and not proc_task.done():
                         proc_task.cancel()

@@ -15,6 +15,7 @@ sherpa-onnx 或模型缺失时 available()=False，功能整体优雅降级（�
 """
 import threading
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +29,8 @@ PREBUFFER_SECONDS = 1.0      # 唤醒前预缓冲，避免削掉问句开头
 MAX_CAPTURE_SECONDS = 15.0   # 单句最长收录，防失控
 MIN_UTTERANCE_SECONDS = 0.6  # 短于此的段视为仅唤醒词/噪声，丢弃继续听
 VAD_MIN_SILENCE = 0.5        # 说完判定：静音超过此时长 → 断句
+ENGAGE_SILENCE_TIMEOUT = 30.0  # 参与态持续沉默超此秒数 → 退出对话（回到需唤醒）
+CLOSE_PHRASES = ("再见", "就这样", "先这样", "不聊了", "拜拜", "结束对话")
 
 
 def model_dir() -> Path:
@@ -93,48 +96,78 @@ class RealtimeVoiceService:
 
 
 class VoiceSession:
-    """单连接语音会话状态机。accept(samples) 返回事件列表，处理层据此驱动 STT/Agent/TTS。
+    """单连接语音会话状态机（含长对话参与状态）。
 
-    事件：{'type':'wake'} / {'type':'endpoint','pcm':np.ndarray} / {'type':'state','state':...}
-    处理层在 endpoint 后置 state='processing'，播放时置 'speaking'，播完置 'listening'。
+    状态：idle（未参与，等唤醒词）/ engaged_listening（已参与，VAD 免唤醒听）/
+    capturing（唤醒或打断后收录）/ processing / speaking。
+    engaged 标志贯穿多轮：唤醒建立 → 每轮答完续期 → 持续沉默/明确收尾才退出。
+    事件：wake / barge_in / endpoint / disengaged。
     """
     def __init__(self, spotter, vad, wake_label: str = WAKE_LABEL):
         self._spotter = spotter
         self._vad = vad
         self._wake_label = wake_label
         self._stream = spotter.create_stream()
-        self.state = "listening"
+        self.state = "idle"
+        self.engaged = False
+        self._last_activity = datetime.now().astimezone()
         self._prebuffer = deque(maxlen=int(PREBUFFER_SECONDS * SAMPLE_RATE))
         self._capture: list[np.ndarray] = []
         self._captured_samples = 0
 
-    def _reset_listening(self):
+    def _reset_idle(self):
         self._stream = self._spotter.create_stream()
         self._prebuffer.clear()
         self._capture = []
         self._captured_samples = 0
-        self.state = "listening"
+        self.state = "idle"
+
+    def _reset_engaged_listening(self):
+        self._vad.reset()
+        self._capture = []
+        self._captured_samples = 0
+        self._last_activity = datetime.now().astimezone()
+        self.state = "engaged_listening"
 
     def set_state(self, state: str):
-        """处理层切换 processing/speaking/listening。回到 listening 时重置 KWS 流。"""
-        if state == "listening":
-            self._reset_listening()
+        if state == "idle":
+            self._reset_idle()
+        elif state == "engaged_listening":
+            self._reset_engaged_listening()
+        elif state == "listening":  # 兼容旧调用：按参与标志归位
+            self._reset_engaged_listening() if self.engaged else self._reset_idle()
         else:
             self.state = state
+
+    def disengage(self):
+        self.engaged = False
+        self._reset_idle()
 
     def _endpoint(self, events):
         pcm = np.concatenate(self._capture) if self._capture else np.zeros(0, dtype=np.float32)
         self._capture = []
         self._captured_samples = 0
-        # 太短（多半只是唤醒词或噪声）：丢弃，继续收录
         if len(pcm) < int(MIN_UTTERANCE_SECONDS * SAMPLE_RATE):
             self._vad.reset()
             return
+        self._last_activity = datetime.now().astimezone()
         self.state = "processing"
         events.append({"type": "endpoint", "pcm": pcm})
 
+    def _vad_capture(self, samples: np.ndarray, events: list) -> None:
+        self._capture.append(samples)
+        self._captured_samples += len(samples)
+        self._vad.accept_waveform(samples)
+        while not self._vad.empty():
+            self._vad.front
+            self._vad.pop()
+            self._endpoint(events)
+            break
+        if self.state in ("capturing", "engaged_listening") and \
+                self._captured_samples > int(MAX_CAPTURE_SECONDS * SAMPLE_RATE):
+            self._endpoint(events)
+
     def _feed_kws(self, samples: np.ndarray, events: list, wake_type: str) -> None:
-        """喂 KWS 等唤醒词；命中则带预缓冲进入收录。wake_type 区分 wake/barge_in。"""
         self._prebuffer.extend(samples.tolist())
         self._stream.accept_waveform(SAMPLE_RATE, samples)
         while self._spotter.is_ready(self._stream):
@@ -144,6 +177,8 @@ class VoiceSession:
                 self._capture = [np.array(self._prebuffer, dtype=np.float32)]
                 self._captured_samples = len(self._prebuffer)
                 self._vad.reset()
+                self.engaged = True
+                self._last_activity = datetime.now().astimezone()
                 self.state = "capturing"
                 events.append({"type": wake_type})
                 return
@@ -151,32 +186,24 @@ class VoiceSession:
     def accept(self, samples: np.ndarray) -> list[dict]:
         samples = np.asarray(samples, dtype=np.float32)
         events: list[dict] = []
-        # processing（识别/思考中）忽略麦克风；speaking 仍听唤醒词以支持打断
         if self.state == "processing":
             return events
-
-        if self.state == "listening":
+        if self.state == "idle":
             self._feed_kws(samples, events, "wake")
             return events
-
         if self.state == "speaking":
-            # 全双工 barge-in：播放期间继续听唤醒词，用户喊"阿伴阿伴"即打断。
-            # 回声由浏览器 AEC（echoCancellation）消除；机器人回答 rarely 含唤醒词，
-            # 故自唤醒风险低。真机回声表现需实测调阈值。
             self._feed_kws(samples, events, "barge_in")
             return events
-
-        if self.state == "capturing":
-            self._capture.append(samples)
-            self._captured_samples += len(samples)
-            self._vad.accept_waveform(samples)
-            while not self._vad.empty():
-                self._vad.front  # 取出段（触发断句）
-                self._vad.pop()
-                self._endpoint(events)
-                break
-            if self.state == "capturing" and self._captured_samples > int(MAX_CAPTURE_SECONDS * SAMPLE_RATE):
-                self._endpoint(events)
+        if self.state == "engaged_listening":
+            now = datetime.now().astimezone()
+            if (now - self._last_activity).total_seconds() > ENGAGE_SILENCE_TIMEOUT:
+                self.engaged = False
+                self._reset_idle()
+                events.append({"type": "disengaged"})
+                return events
+            self._vad_capture(samples, events)
             return events
-
+        if self.state == "capturing":
+            self._vad_capture(samples, events)
+            return events
         return events

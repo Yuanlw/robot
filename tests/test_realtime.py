@@ -4,6 +4,7 @@
 """
 import unittest
 import wave
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -92,14 +93,55 @@ class RealtimeEngineTests(unittest.TestCase):
     def test_back_to_listening_resets(self):
         sess = realtime.VoiceSession(_test_spotter(), _test_vad(), wake_label="文森特卡索")
         sess.set_state("processing")
-        sess.set_state("listening")
-        self.assertEqual(sess.state, "listening")
+        sess.set_state("listening")  # 未参与 → idle
+        self.assertEqual(sess.state, "idle")
 
     def test_silence_no_wake(self):
         sess = realtime.VoiceSession(_test_spotter(), _test_vad(), wake_label="文森特卡索")
         events = self._feed(sess, np.zeros(int(2 * 16000), dtype=np.float32))
         self.assertEqual(events, [])
-        self.assertEqual(sess.state, "listening")
+        self.assertEqual(sess.state, "idle")
+
+    def test_wake_establishes_engagement(self):
+        sess = realtime.VoiceSession(_test_spotter(), _test_vad(), wake_label="文森特卡索")
+        s = _readwav(KWS / "test_wavs" / "3.wav")
+        self._feed(sess, np.concatenate([s, np.zeros(int(1.5 * 16000), dtype=np.float32)]))
+        self.assertTrue(sess.engaged)
+
+    def test_engaged_listening_no_wake_needed(self):
+        sess = realtime.VoiceSession(_test_spotter(), _test_vad(), wake_label="文森特卡索")
+        sess.engaged = True
+        sess.set_state("engaged_listening")
+        s = _readwav(KWS / "test_wavs" / "0.wav")  # 纯语音无唤醒词
+        events = self._feed(sess, np.concatenate([s, np.zeros(int(1.5 * 16000), dtype=np.float32)]))
+        types = [e["type"] for e in events]
+        self.assertIn("endpoint", types)
+        self.assertNotIn("wake", types)
+
+    def test_engaged_return_after_turn(self):
+        sess = realtime.VoiceSession(_test_spotter(), _test_vad(), wake_label="文森特卡索")
+        sess.engaged = True
+        sess.set_state("speaking")
+        sess.set_state("listening")
+        self.assertEqual(sess.state, "engaged_listening")
+
+    def test_silence_timeout_disengages(self):
+        sess = realtime.VoiceSession(_test_spotter(), _test_vad(), wake_label="文森特卡索")
+        sess.engaged = True
+        sess.set_state("engaged_listening")
+        sess._last_activity = sess._last_activity - timedelta(seconds=realtime.ENGAGE_SILENCE_TIMEOUT + 5)
+        events = sess.accept(np.zeros(1600, dtype=np.float32))
+        self.assertIn("disengaged", [e["type"] for e in events])
+        self.assertFalse(sess.engaged)
+        self.assertEqual(sess.state, "idle")
+
+    def test_explicit_disengage(self):
+        sess = realtime.VoiceSession(_test_spotter(), _test_vad(), wake_label="文森特卡索")
+        sess.engaged = True
+        sess.set_state("engaged_listening")
+        sess.disengage()
+        self.assertFalse(sess.engaged)
+        self.assertEqual(sess.state, "idle")
 
 
 class RealtimeGracefulTests(unittest.TestCase):

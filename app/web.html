@@ -518,13 +518,15 @@ async function startVoiceMode(){
   }catch(e){$('voiceModeStatus').textContent='麦克风启动失败：'+e.message}
 }
 function handleVoiceMsg(d){
-  if(d.type==='ready')$('voiceModeStatus').textContent='正在听…说"'+(d.wake||'阿伴阿伴')+'"唤醒';
+  if(d.type==='ready')$('voiceModeStatus').textContent='说"'+(d.wake||'阿伴阿伴')+'"唤醒我';
   else if(d.type==='wake'){setRobotState('listening','我在听，请说');$('voiceModeStatus').textContent='听到唤醒，请说…'}
   else if(d.type==='barge_in'){if(voiceAudio){voiceAudio.onended=null;voiceAudio.pause();voiceAudio=null}setRobotState('listening','我在听，请说');$('voiceModeStatus').textContent='已打断，请说…'}
+  else if(d.type==='disengaged'){setRobotState('listening');$('voiceModeStatus').textContent='对话已结束，说"阿伴阿伴"重新开始'}
   else if(d.type==='state'){
     if(d.state==='thinking')setRobotState('thinking');
     else if(d.state==='speaking')setRobotState('speaking');
-    else if(d.state==='listening'){setRobotState('listening');$('voiceModeStatus').textContent='正在听…说"阿伴阿伴"唤醒'}
+    else if(d.state==='engaged_listening'){setRobotState('listening');$('voiceModeStatus').textContent='对话中，直接说即可（免唤醒）'}
+    else{setRobotState('listening');$('voiceModeStatus').textContent='说"阿伴阿伴"唤醒我'}
   }
   else if(d.type==='transcript')addMsg(d.text,'user');
   else if(d.type==='reply'){if(d.text){addMsg(d.text,'bot');lastReply=d.text}if(d.drafts&&d.drafts.length)d.drafts.forEach(dr=>confirmation({...dr,draft_id:dr.id}))}
