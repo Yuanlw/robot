@@ -1,9 +1,11 @@
-"""学习模式纯语音对话引擎（阶段 B 第一步）：常开麦 + 唤醒词 + VAD 自动断句。
+"""学习模式纯语音对话引擎（阶段 B）：常开麦 + 唤醒词 + VAD 自动断句 + barge-in 打断。
 
-设计（半双工，免按钮）：
+设计（全双工打断，免按钮）：
 - listening：麦克风常开，音频喂 KWS 等唤醒词"阿伴阿伴"；
 - capturing：听到唤醒词后收录这句（含唤醒前 ~1s 预缓冲），VAD 检测说完（静音）→ endpoint；
-- processing/speaking：由 WebSocket 处理层置位；期间忽略麦克风（半双工防回声自唤醒）。
+- speaking：播放回答期间仍听唤醒词——用户喊"阿伴阿伴"即 barge_in 打断，转 capturing；
+  回声由浏览器 AEC 消除（机器人回答 rarely 含唤醒词，自唤醒风险低）；
+- processing：识别/思考中忽略麦克风，由 WebSocket 处理层置位。
 
 隐私红线：音频只在内存流过本地 sherpa-onnx 模型，不录、不存、不上传；
 唤醒后的语音按现有 /api/stt 隐私边界送百炼识别。
@@ -131,27 +133,37 @@ class VoiceSession:
         self.state = "processing"
         events.append({"type": "endpoint", "pcm": pcm})
 
+    def _feed_kws(self, samples: np.ndarray, events: list, wake_type: str) -> None:
+        """喂 KWS 等唤醒词；命中则带预缓冲进入收录。wake_type 区分 wake/barge_in。"""
+        self._prebuffer.extend(samples.tolist())
+        self._stream.accept_waveform(SAMPLE_RATE, samples)
+        while self._spotter.is_ready(self._stream):
+            self._spotter.decode_stream(self._stream)
+            result = self._spotter.get_result(self._stream)
+            if result and self._wake_label in result:
+                self._capture = [np.array(self._prebuffer, dtype=np.float32)]
+                self._captured_samples = len(self._prebuffer)
+                self._vad.reset()
+                self.state = "capturing"
+                events.append({"type": wake_type})
+                return
+
     def accept(self, samples: np.ndarray) -> list[dict]:
         samples = np.asarray(samples, dtype=np.float32)
         events: list[dict] = []
-        # 半双工：处理/播放期间忽略麦克风，防机器人自己的声音被采回自唤醒
-        if self.state in ("processing", "speaking"):
+        # processing（识别/思考中）忽略麦克风；speaking 仍听唤醒词以支持打断
+        if self.state == "processing":
             return events
 
         if self.state == "listening":
-            self._prebuffer.extend(samples.tolist())
-            self._stream.accept_waveform(SAMPLE_RATE, samples)
-            while self._spotter.is_ready(self._stream):
-                self._spotter.decode_stream(self._stream)
-                result = self._spotter.get_result(self._stream)
-                if result and self._wake_label in result:
-                    # 唤醒：带预缓冲进入收录，重置 VAD
-                    self._capture = [np.array(self._prebuffer, dtype=np.float32)]
-                    self._captured_samples = len(self._prebuffer)
-                    self._vad.reset()
-                    self.state = "capturing"
-                    events.append({"type": "wake"})
-                    break
+            self._feed_kws(samples, events, "wake")
+            return events
+
+        if self.state == "speaking":
+            # 全双工 barge-in：播放期间继续听唤醒词，用户喊"阿伴阿伴"即打断。
+            # 回声由浏览器 AEC（echoCancellation）消除；机器人回答 rarely 含唤醒词，
+            # 故自唤醒风险低。真机回声表现需实测调阈值。
+            self._feed_kws(samples, events, "barge_in")
             return events
 
         if self.state == "capturing":

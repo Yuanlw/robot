@@ -64,12 +64,30 @@ class RealtimeEngineTests(unittest.TestCase):
         self.assertGreater(len(ep["pcm"]) / 16000, 0.6)
         self.assertEqual(sess.state, "processing")
 
-    def test_half_duplex_ignores_mic_while_processing(self):
+    def test_processing_ignores_mic(self):
         sess = realtime.VoiceSession(_test_spotter(), _test_vad(), wake_label="文森特卡索")
         sess.set_state("processing")
         self.assertEqual(sess.accept(np.ones(1600, dtype=np.float32)), [])
+
+    def test_barge_in_during_speaking(self):
+        # 全双工：说话期间喊唤醒词 → barge_in 打断，转 capturing
+        sess = realtime.VoiceSession(_test_spotter(), _test_vad(), wake_label="文森特卡索")
         sess.set_state("speaking")
-        self.assertEqual(sess.accept(np.ones(1600, dtype=np.float32)), [])
+        s = _readwav(KWS / "test_wavs" / "3.wav")
+        s = np.concatenate([s, np.zeros(int(1.5 * 16000), dtype=np.float32)])
+        events = self._feed(sess, s)
+        types = [e["type"] for e in events]
+        self.assertIn("barge_in", types)
+        self.assertNotIn("wake", types)
+        self.assertIn("endpoint", types)
+
+    def test_speaking_ignores_non_wake_audio(self):
+        # 说话期间非唤醒音频（如回声/噪声）不打断
+        sess = realtime.VoiceSession(_test_spotter(), _test_vad(), wake_label="文森特卡索")
+        sess.set_state("speaking")
+        events = self._feed(sess, np.zeros(int(1 * 16000), dtype=np.float32))
+        self.assertEqual(events, [])
+        self.assertEqual(sess.state, "speaking")
 
     def test_back_to_listening_resets(self):
         sess = realtime.VoiceSession(_test_spotter(), _test_vad(), wake_label="文森特卡索")

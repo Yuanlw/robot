@@ -520,6 +520,7 @@ async function startVoiceMode(){
 function handleVoiceMsg(d){
   if(d.type==='ready')$('voiceModeStatus').textContent='正在听…说"'+(d.wake||'阿伴阿伴')+'"唤醒';
   else if(d.type==='wake'){setRobotState('listening','我在听，请说');$('voiceModeStatus').textContent='听到唤醒，请说…'}
+  else if(d.type==='barge_in'){if(voiceAudio){voiceAudio.onended=null;voiceAudio.pause();voiceAudio=null}setRobotState('listening','我在听，请说');$('voiceModeStatus').textContent='已打断，请说…'}
   else if(d.type==='state'){
     if(d.state==='thinking')setRobotState('thinking');
     else if(d.state==='speaking')setRobotState('speaking');

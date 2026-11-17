@@ -1015,6 +1015,11 @@ async def ws_voice(websocket: WebSocket):
                 for event in vs.accept(pcm):
                     if event["type"] == "wake":
                         await send({"type": "wake"})
+                    elif event["type"] == "barge_in":
+                        # 用户在机器人说话时喊唤醒词 → 打断：停掉播放兜底计时，通知前端立即停播
+                        if proc_task and not proc_task.done():
+                            proc_task.cancel()
+                        await send({"type": "barge_in"})
                     elif event["type"] == "endpoint":
                         if proc_task is None or proc_task.done():
                             proc_task = asyncio.create_task(process(event["pcm"]))

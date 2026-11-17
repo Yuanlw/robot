@@ -75,6 +75,16 @@ function makeEnv() {
   check('退出后按钮文案复位', env.calls.btnText.some(t => t.includes('开启纯语音对话')), JSON.stringify(env.calls.btnText));
   check('退出后状态归 idle', env.calls.state.includes('idle'), JSON.stringify(env.calls.state));
 }
+// 5) barge_in 打断：立即停播、转倾听、不发 playback_done
+{
+  const env = makeEnv();
+  let paused = 0;
+  globalThis.voiceAudio = { pause: () => { paused++; }, onended: () => {} };
+  env.handleVoiceMsg({ type: 'barge_in' });
+  check('barge_in 立即停播', paused === 1, 'paused=' + paused);
+  check('barge_in 转倾听', env.calls.state.includes('listening'), JSON.stringify(env.calls.state));
+  check('barge_in 不发 playback_done', !env.calls.sent.some(m => JSON.parse(m).type === 'playback_done'), JSON.stringify(env.calls.sent));
+}
 
 console.log(failed === 0 ? 'FRONTEND_VOICE=PASS' : 'FRONTEND_VOICE=FAIL(' + failed + ')');
 process.exit(failed === 0 ? 0 : 1);
